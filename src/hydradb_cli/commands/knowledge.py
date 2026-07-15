@@ -34,6 +34,8 @@ _STATUS_STYLES = {
     "not found \u2014 source ID does not exist": "red",
 }
 
+_FAILED_UPLOAD_STATUSES = {"error", "errored", "failed"}
+
 
 def _human_status(raw: str, error_code: str | None = None) -> str:
     """Map raw API status + error_code to a clear label."""
@@ -51,6 +53,41 @@ def _status_style(label: str) -> str:
         if key in label:
             return style
     return "white"
+
+
+def _upload_failure_reasons(result: dict) -> list[str]:
+    """Collect item-level or aggregate failure reasons from an upload response."""
+    reasons = []
+    results = result.get("results", [])
+    if isinstance(results, list):
+        for index, item in enumerate(results, 1):
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status", "")).lower()
+            error = item.get("error")
+            if status in _FAILED_UPLOAD_STATUSES or error:
+                source_id = item.get("source_id", item.get("id", f"item {index}"))
+                reasons.append(f"{source_id}: {error or f'status={status}'}")
+
+    failed_count = result.get("failed_count", 0)
+    if isinstance(failed_count, int) and failed_count > len(reasons):
+        message = result.get("message") or f"{failed_count} upload item(s) failed"
+        reasons.append(str(message))
+
+    if result.get("success") is False and not reasons:
+        reasons.append(str(result.get("message") or "Server rejected the upload"))
+
+    return reasons
+
+
+def _exit_on_upload_failures(result: dict) -> None:
+    """Report rejected upload items on stderr and exit non-zero."""
+    reasons = _upload_failure_reasons(result)
+    if not reasons:
+        return
+    for reason in reasons:
+        typer.echo(f"Upload failed: {reason}", err=True)
+    raise typer.Exit(code=1)
 
 
 @app.command()
@@ -122,6 +159,7 @@ def upload(
             )
 
         print_result(result, fmt)
+        _exit_on_upload_failures(result)
     except FileNotFoundError as e:
         print_error(str(e))
     except HydraDBClientError as e:
@@ -190,6 +228,7 @@ def upload_text(
             return Panel("\n".join(lines), border_style="green", padding=(0, 1))
 
         print_result(result, fmt)
+        _exit_on_upload_failures(result)
     except HydraDBClientError as e:
         handle_api_error(e)
     except httpx.RequestError as e:
