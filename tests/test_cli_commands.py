@@ -266,6 +266,55 @@ class TestMemoriesCommands:
         assert data["success_count"] == 1
 
     @patch("hydradb_cli.commands.memories.get_client")
+    def test_memories_add_failed_response_exits_nonzero(self, mock_get_client, clean_config):
+        self._setup_auth(clean_config)
+        mock_client = MagicMock()
+        response = {
+            "success": False,
+            "message": "Memory was not queued",
+            "success_count": 0,
+            "failed_count": 1,
+            "results": [
+                {
+                    "source_id": "memory-id",
+                    "status": "failed",
+                    "error": "Invalid memory format",
+                }
+            ],
+        }
+        mock_client.add_memory.return_value = response
+        mock_get_client.return_value = mock_client
+
+        result = runner.invoke(app, ["--output", "json", "memories", "add", "--text", "test"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout) == response
+        assert "Invalid memory format" in result.stderr
+
+    @patch("hydradb_cli.commands.memories.get_client")
+    def test_memories_add_non_object_response_exits_cleanly(self, mock_get_client, clean_config):
+        self._setup_auth(clean_config)
+        mock_client = MagicMock()
+        mock_client.add_memory.return_value = []
+        mock_get_client.return_value = mock_client
+
+        result = runner.invoke(app, ["--output", "json", "memories", "add", "--text", "test"])
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert json.loads(result.stdout) == []
+        assert "Unexpected response format from server" in result.stderr
+        assert "Traceback" not in result.stderr
+
+        result = runner.invoke(app, ["memories", "add", "--text", "test"])
+
+        assert result.exit_code == 1
+        assert "Unexpected response format from server" in result.stdout
+        assert "[]" in result.stdout
+        assert "Unexpected response format from server" in result.stderr
+        assert "Traceback" not in result.stderr
+
+    @patch("hydradb_cli.commands.memories.get_client")
     def test_memories_add_empty_text_fails(self, mock_get_client, clean_config):
         self._setup_auth(clean_config)
         result = runner.invoke(app, ["memories", "add", "--text", "   "])
