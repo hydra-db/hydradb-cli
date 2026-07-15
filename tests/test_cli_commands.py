@@ -425,6 +425,7 @@ class TestKnowledgeCommands:
                 "my-sid",
                 "--title",
                 "Pricing Notes",
+                "--upsert",
             ],
         )
         assert result.exit_code == 0
@@ -433,12 +434,56 @@ class TestKnowledgeCommands:
         assert call_kwargs["source_id"] == "my-sid"
         assert call_kwargs["title"] == "Pricing Notes"
         assert call_kwargs["text"] == "Q4 pricing: Starter $29, Pro $79"
+        assert call_kwargs["upsert"] is True
 
     @patch("hydradb_cli.commands.knowledge.get_client")
     def test_knowledge_upload_text_empty_fails(self, mock_get_client, clean_config):
         self._setup_auth(clean_config)
         result = runner.invoke(app, ["knowledge", "upload-text", "--text", ""])
         assert result.exit_code != 0
+
+    @patch("hydradb_cli.commands.knowledge.get_client")
+    def test_knowledge_upload_text_failed_response_exits_nonzero(self, mock_get_client, clean_config):
+        self._setup_auth(clean_config)
+        mock_client = MagicMock()
+        mock_client.upload_text.return_value = {
+            "success": False,
+            "success_count": 0,
+            "failed_count": 1,
+            "results": [
+                {
+                    "source_id": "stable-id",
+                    "status": "failed",
+                    "error": "Source already exists and upsert is false",
+                }
+            ],
+        }
+        mock_get_client.return_value = mock_client
+
+        result = runner.invoke(
+            app,
+            ["--output", "json", "knowledge", "upload-text", "--text", "replacement", "--source-id", "stable-id"],
+        )
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["failed_count"] == 1
+        assert "Source already exists and upsert is false" in result.stderr
+
+    @patch("hydradb_cli.commands.knowledge.get_client")
+    def test_knowledge_file_upload_failed_item_exits_nonzero(self, mock_get_client, clean_config):
+        self._setup_auth(clean_config)
+        mock_client = MagicMock()
+        mock_client.upload_knowledge.return_value = {
+            "success": True,
+            "results": [{"source_id": "report-id", "status": "failed", "error": "Unsupported file format"}],
+        }
+        mock_get_client.return_value = mock_client
+
+        result = runner.invoke(app, ["--output", "json", "knowledge", "upload", "report.bin"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["results"][0]["status"] == "failed"
+        assert "Unsupported file format" in result.stderr
 
     @patch("hydradb_cli.commands.knowledge.get_client")
     def test_knowledge_delete(self, mock_get_client, clean_config):
