@@ -142,6 +142,11 @@ def upload_text(
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Sub-tenant ID."),
     title: str | None = typer.Option(None, "--title", help="Title for the knowledge source."),
     source_id: str | None = typer.Option(None, "--source-id", help="Custom source ID."),
+    upsert: bool = typer.Option(
+        False,
+        "--upsert",
+        help="Overwrite an existing source with the same ID.",
+    ),
 ) -> None:
     """Upload text content to the knowledge base.
 
@@ -169,6 +174,7 @@ def upload_text(
                 sub_tenant_id=stid,
                 title=title,
                 source_id=source_id,
+                upsert=upsert,
             )
 
         def fmt(r: dict):

@@ -425,6 +425,7 @@ class TestKnowledgeCommands:
                 "my-sid",
                 "--title",
                 "Pricing Notes",
+                "--upsert",
             ],
         )
         assert result.exit_code == 0
@@ -433,6 +434,7 @@ class TestKnowledgeCommands:
         assert call_kwargs["source_id"] == "my-sid"
         assert call_kwargs["title"] == "Pricing Notes"
         assert call_kwargs["text"] == "Q4 pricing: Starter $29, Pro $79"
+        assert call_kwargs["upsert"] is True
 
     @patch("hydradb_cli.commands.knowledge.get_client")
     def test_knowledge_upload_text_empty_fails(self, mock_get_client, clean_config):

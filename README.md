@@ -242,7 +242,7 @@ Upload, verify, and delete knowledge sources (files or raw text).
 | Command | What it does | Key options |
 |---------|--------------|-------------|
 | `knowledge upload <files...>` | Uploads one or more files (PDF, DOCX, TXT, etc.) for ingestion. | `--upsert` |
-| `knowledge upload-text` | Uploads plain text content directly without a file. | `--text` / `-t`, `--title`, `--source-id` |
+| `knowledge upload-text` | Uploads plain text content directly without a file. | `--text` / `-t`, `--title`, `--source-id`, `--upsert` |
 | `knowledge verify <ids...>` | Checks the processing status of previously uploaded sources. | — |
 | `knowledge delete <ids...>` | Deletes one or more knowledge sources. | `--yes` / `-y` |
 

@@ -212,12 +212,24 @@ class TestKnowledgeMethods:
 
             data = mock_post.call_args[1]["data"]
             assert data["tenant_id"] == "t1"
+            assert data["upsert"] == "false"
             app_sources = json.loads(data["app_sources"])
             assert app_sources["id"] == "custom-id"
             assert app_sources["tenant_id"] == "t1"
             assert app_sources["sub_tenant_id"] == "t1"
             assert app_sources["content"] == {"text": "Meeting notes content"}
             assert app_sources["title"] == "Meeting Notes"
+
+    def test_upload_text_explicit_upsert(self, client):
+        with patch.object(client._http, "post") as mock_post:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"results": []}
+            mock_post.return_value = mock_resp
+
+            client.upload_text(tenant_id="t1", text="updated", source_id="stable-id", upsert=True)
+
+            assert mock_post.call_args[1]["data"]["upsert"] == "true"
 
     def test_upload_text_auto_generates_id(self, client):
         """When no source_id is given, a UUID is auto-generated."""
@@ -278,6 +290,20 @@ class TestKnowledgeMethods:
     def test_upload_knowledge_file_not_found(self, client):
         with pytest.raises(FileNotFoundError):
             client.upload_knowledge("t1", ["/nonexistent/file.pdf"])
+
+    def test_upload_knowledge_explicitly_disables_upsert_by_default(self, client, tmp_path):
+        source_file = tmp_path / "source.txt"
+        source_file.write_text("original knowledge")
+
+        with patch.object(client._http, "post") as mock_post:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"results": []}
+            mock_post.return_value = mock_resp
+
+            client.upload_knowledge("t1", [str(source_file)])
+
+            assert mock_post.call_args[1]["data"]["upsert"] == "false"
 
     def test_delete_knowledge(self, client):
         with patch.object(client._http, "post") as mock_post:

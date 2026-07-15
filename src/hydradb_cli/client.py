@@ -250,11 +250,12 @@ class HydraDBClient:
                 opened.append(f)
                 files.append(("files", (p.name, f)))
 
-            data: dict[str, Any] = {"tenant_id": tenant_id}
+            data: dict[str, Any] = {
+                "tenant_id": tenant_id,
+                "upsert": str(upsert).lower(),
+            }
             if sub_tenant_id is not None:
                 data["sub_tenant_id"] = sub_tenant_id
-            if upsert:
-                data["upsert"] = "true"
             if file_metadata:
                 data["file_metadata"] = json.dumps(file_metadata)
 
@@ -277,6 +278,7 @@ class HydraDBClient:
         sub_tenant_id: str | None = None,
         title: str | None = None,
         source_id: str | None = None,
+        upsert: bool = False,
     ) -> dict:
         """Upload text content as a knowledge source (via app_sources).
 
@@ -295,7 +297,10 @@ class HydraDBClient:
         if title:
             source["title"] = title
 
-        data: dict[str, Any] = {"tenant_id": tenant_id}
+        data: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "upsert": str(upsert).lower(),
+        }
         if sub_tenant_id:
             data["sub_tenant_id"] = sub_tenant_id
         data["app_sources"] = json.dumps(source)
