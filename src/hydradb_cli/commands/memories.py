@@ -4,6 +4,7 @@ import sys
 
 import httpx
 import typer
+from rich.markup import escape
 from rich.panel import Panel
 
 from hydradb_cli.client import HydraDBClientError
@@ -119,7 +120,7 @@ def add(
             mark = "\u2713" if failed_count == 0 else "!"
             header = f"[{status}]{mark}[/{status}] Memory added ({success_count} success, {failed_count} failed)"
 
-            lines = [header, f'[dim]"{preview}"[/dim]']
+            lines = [header, f'[dim]"{escape(preview)}"[/dim]']
             results = r.get("results", [])
             for item in results:
                 sid = item.get("source_id", "unknown")
@@ -165,7 +166,7 @@ def list_memories(
                 mid = mem.get("memory_id", "unknown")
                 content = mem.get("memory_content", "")
                 preview = content[:100] + "..." if len(content) > 100 else content
-                rows.append([str(i), mid, preview])
+                rows.append([str(i), mid, escape(preview)])
             return make_table(
                 "#",
                 "Memory ID",
