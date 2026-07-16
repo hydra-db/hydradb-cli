@@ -3,6 +3,7 @@
 import httpx
 import typer
 from rich.console import Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -35,7 +36,7 @@ def _format_recall_result(r: dict):
         score = chunk.get("relevancy_score")
         score_str = f" \u2022 {score:.0%}" if score is not None else ""
         title_text = chunk.get("source_title", "")
-        title_str = f" \u2014 {title_text}" if title_text else ""
+        title_str = f" \u2014 {escape(str(title_text))}" if title_text else ""
 
         content = chunk.get("chunk_content", "")
         preview = content[:300] + "..." if len(content) > 300 else content
@@ -43,7 +44,7 @@ def _format_recall_result(r: dict):
         panel_title = f"[bold]{i}[/bold]{score_str}{title_str}"
         panels.append(
             Panel(
-                preview,
+                escape(preview),
                 title=panel_title,
                 title_align="left",
                 border_style="cyan",

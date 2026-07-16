@@ -2,6 +2,7 @@
 
 import httpx
 import typer
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -175,7 +176,7 @@ def upload_text(
             preview = text[:80] + "..." if len(text) > 80 else text
             lines = [
                 f"[green]\u2713[/green] Knowledge source uploaded to tenant [bold]{tid}[/bold]",
-                f'[dim]"{preview}"[/dim]',
+                f'[dim]"{escape(preview)}"[/dim]',
             ]
             results = r.get("results", [])
             for item in results:

@@ -3,6 +3,7 @@
 import httpx
 import typer
 from rich.console import Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -81,7 +82,7 @@ def content(
             meta = "\n".join(meta_parts)
 
             if content_text:
-                body = f"{meta}\n\n{content_text}"
+                body = f"{meta}\n\n{escape(content_text)}"
             elif content_b64:
                 body = f"{meta}\n\n[dim](Binary content, {len(content_b64)} chars base64-encoded)[/dim]"
             else:
@@ -193,7 +194,7 @@ def sources(
                     mid = mem.get("memory_id", "unknown")
                     mem_content = mem.get("memory_content", "")
                     preview = mem_content[:100] + "..." if len(mem_content) > 100 else mem_content
-                    rows.append([str(i), mid, preview])
+                    rows.append([str(i), mid, escape(preview)])
                 return make_table(
                     "#",
                     "Memory ID",
