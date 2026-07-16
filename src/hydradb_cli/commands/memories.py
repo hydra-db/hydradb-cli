@@ -4,6 +4,7 @@ import sys
 
 import httpx
 import typer
+from rich.markup import escape
 from rich.panel import Panel
 
 from hydradb_cli.client import HydraDBClientError
@@ -18,6 +19,51 @@ from hydradb_cli.utils.common import (
 )
 
 app = typer.Typer(help="Manage user memories.")
+
+_FAILED_MEMORY_STATUSES = {"error", "errored", "failed"}
+
+
+def _memory_failure_reasons(result: object) -> list[str]:
+    """Collect item-level or aggregate failure reasons from an add response."""
+    if not isinstance(result, dict):
+        return ["Unexpected response format from server"]
+
+    reasons = []
+    # The response schema does not require any fields, so an empty object alone
+    # is not sufficient evidence that the operation failed.
+    if not result:
+        return reasons
+
+    results = result.get("results", [])
+    if isinstance(results, list):
+        for index, item in enumerate(results, 1):
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status", "")).lower()
+            error = item.get("error")
+            if status in _FAILED_MEMORY_STATUSES or error:
+                source_id = item.get("source_id", item.get("id", f"item {index}"))
+                reasons.append(f"{source_id}: {error or f'status={status}'}")
+
+    failed_count = result.get("failed_count", 0)
+    if isinstance(failed_count, int) and failed_count > len(reasons):
+        message = result.get("message") or f"{failed_count} memory item(s) failed"
+        reasons.append(str(message))
+
+    if result.get("success") is False and not reasons:
+        reasons.append(str(result.get("message") or "Server rejected the memory"))
+
+    return reasons
+
+
+def _exit_on_memory_failures(result: object) -> None:
+    """Report rejected memory items on stderr and exit non-zero."""
+    reasons = _memory_failure_reasons(result)
+    if not reasons:
+        return
+    for reason in reasons:
+        typer.echo(f"Memory add failed: {reason}", err=True)
+    raise typer.Exit(code=1)
 
 
 @app.command()
@@ -110,7 +156,14 @@ def add(
                 upsert=upsert,
             )
 
-        def fmt(r: dict):
+        def fmt(r: object):
+            if not isinstance(r, dict):
+                return Panel(
+                    f"[yellow]! Unexpected response format from server[/yellow]\n[dim]{escape(repr(r))}[/dim]",
+                    border_style="yellow",
+                    padding=(0, 1),
+                )
+
             success_count = r.get("success_count", 0)
             failed_count = r.get("failed_count", 0)
             preview = text[:80] + "..." if len(text) > 80 else text
@@ -131,6 +184,7 @@ def add(
             return Panel("\n".join(lines), border_style=status, padding=(0, 1))
 
         print_result(result, fmt)
+        _exit_on_memory_failures(result)
     except HydraDBClientError as e:
         handle_api_error(e)
     except httpx.RequestError as e:
