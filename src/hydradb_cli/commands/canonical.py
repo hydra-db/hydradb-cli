@@ -259,11 +259,9 @@ def doctor() -> None:
 @database_app.command("create")
 def database_create(
     database: str = typer.Argument(help="Unique database identifier."),
-    embeddings: bool = typer.Option(False, "--embeddings", help="Create as an embeddings database."),
-    embeddings_dimension: int | None = typer.Option(None, "--embeddings-dimension", help="Embedding dimensions."),
 ) -> None:
     """Create a new database."""
-    _impl.do_database_create(database, embeddings=embeddings, embeddings_dimension=embeddings_dimension)
+    _impl.do_database_create(database)
 
 
 @database_app.command("delete")

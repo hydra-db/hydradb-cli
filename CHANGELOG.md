@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Removed
+
+- **`database create --embeddings` and `--embeddings-dimension`.** These forwarded
+  `is_embeddings_tenant` to the API, which the spec documents as an internal flag. It
+  provisions a raw-embeddings collection *instead of* the knowledge and memory
+  collections, so the resulting database could not be used by any other command in this
+  CLI: `ingest` reported success and then failed asynchronously with `E6004`, `stats`
+  showed `row_count: 0`, `query` returned nothing, and `ready_for_ingestion` never
+  became true. The raw-embeddings API these databases exist for has no CLI surface.
+  `hydradb tenant create` loses the same two flags.
+
 ### Changed
 
 - **The curl installer now installs from GitHub Releases instead of PyPI.** PyPI

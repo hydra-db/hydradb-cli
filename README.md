@@ -305,7 +305,7 @@ Create and manage databases.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `database create <database>` | Provisions a new database | `--embeddings`, `--embeddings-dimension` |
+| `database create <database>` | Provisions a new database | — |
 | `database list` | Lists all databases for the authenticated user | — |
 | `database collections [database]` | Lists collections within a database | — |
 | `database stats [database]` | Row-count statistics | — |

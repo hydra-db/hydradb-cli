@@ -590,25 +590,18 @@ def do_ingestion_status(
 # ── database group ───────────────────────────────────────────────────────────
 
 
-def do_database_create(
-    database: str,
-    *,
-    embeddings: bool = False,
-    embeddings_dimension: int | None = None,
-) -> None:
+def do_database_create(database: str) -> None:
     if not database.strip():
         print_error("Database ID cannot be empty.")
-    if embeddings and embeddings_dimension is None:
-        print_error("--embeddings-dimension is required when --embeddings is set.")
 
+    # is_embeddings_tenant is deliberately not passed. The API treats it as an
+    # internal flag: it provisions a raw-embeddings collection *instead of* the
+    # knowledge and memory collections, so the resulting database cannot be used
+    # by any other command in this CLI (see CHANGELOG 'Removed').
     wrapper = get_wrapper()
     result = _execute(
         "Creating database...",
-        lambda: wrapper.databases.create(
-            database=database,
-            is_embeddings_tenant=embeddings or None,
-            embeddings_dimension=embeddings_dimension,
-        ),
+        lambda: wrapper.databases.create(database=database),
     )
     print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.")
 

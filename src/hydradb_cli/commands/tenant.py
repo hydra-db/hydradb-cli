@@ -16,12 +16,10 @@ app = typer.Typer(help="[dim](deprecated)[/dim] Tenant management — use 'hydra
 @app.command()
 def create(
     tenant_id: str = typer.Argument(help="Unique tenant identifier."),
-    embeddings: bool = typer.Option(False, "--embeddings", help="Create as an embeddings tenant."),
-    embeddings_dimension: int | None = typer.Option(None, "--embeddings-dimension", help="Embedding dimensions."),
 ) -> None:
     """[dim](deprecated)[/dim] Create a tenant — use 'hydradb database create'."""
     warn_deprecated("tenant create", "database create")
-    _impl.do_database_create(tenant_id, embeddings=embeddings, embeddings_dimension=embeddings_dimension)
+    _impl.do_database_create(tenant_id)
 
 
 @app.command()

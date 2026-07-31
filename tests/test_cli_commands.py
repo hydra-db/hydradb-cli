@@ -335,6 +335,26 @@ class TestDatabase:
         assert result.exit_code == 0
         assert w.databases.create.call_args.kwargs["database"] == "new-db"
 
+    def test_create_does_not_send_embeddings_fields(self):
+        # is_embeddings_tenant provisions a raw-embeddings collection *instead of*
+        # the knowledge and memory ones, leaving a database no other command can
+        # use. Sending it at all is the bug, so assert the wire call stays clean.
+        _auth()
+        w = _wrapper(**{"databases.create": {"status": "accepted"}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["database", "create", "new-db"])
+        assert result.exit_code == 0
+        kwargs = w.databases.create.call_args.kwargs
+        assert "is_embeddings_tenant" not in kwargs
+        assert "embeddings_dimension" not in kwargs
+
+    def test_create_rejects_removed_embeddings_flags(self):
+        _auth()
+        for flag in (["--embeddings"], ["--embeddings-dimension", "384"]):
+            with _patch_wrapper(_wrapper()):
+                result = runner.invoke(app, ["database", "create", "new-db", *flag])
+            assert result.exit_code != 0, f"{flag} should no longer be accepted"
+
     def test_delete_requires_confirm(self):
         _auth()
         with _patch_wrapper(_wrapper()):
