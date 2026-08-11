@@ -253,6 +253,46 @@ class TestIngest:
             result = runner.invoke(app, ["ingest", str(f), "--no-infer"])
         assert result.exit_code != 0
 
+    def test_ingest_reads_piped_stdin(self):
+        """`echo note | hydradb ingest` — the documented pipe form."""
+        _auth()
+        w = _wrapper(**{"context.ingest": {"success_count": 1, "failed_count": 0, "results": [{"id": "src_1"}]}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest"], input="piped note\n")
+        assert result.exit_code == 0
+        assert w.context.ingest.call_args.kwargs["text"] == "piped note"
+
+    def test_ingest_reads_stdin_with_explicit_dash(self):
+        _auth()
+        w = _wrapper(**{"context.ingest": {"success_count": 1, "failed_count": 0, "results": [{"id": "src_1"}]}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--text", "-"], input="dashed note\n")
+        assert result.exit_code == 0
+        assert w.context.ingest.call_args.kwargs["text"] == "dashed note"
+
+    def test_ingest_knowledge_reads_piped_stdin(self):
+        _auth()
+        w = _wrapper(**{"context.ingest": {"results": [{"id": "k1"}]}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--kind", "knowledge"], input="piped knowledge\n")
+        assert result.exit_code == 0
+        assert w.context.ingest.call_args.kwargs["text"] == "piped knowledge"
+
+    def test_ingest_piped_stdin_preserves_multiline_text(self):
+        _auth()
+        w = _wrapper(**{"context.ingest": {"success_count": 1, "failed_count": 0, "results": [{"id": "src_1"}]}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest"], input="line one\nline two\n")
+        assert result.exit_code == 0
+        assert w.context.ingest.call_args.kwargs["text"] == "line one\nline two"
+
+    def test_ingest_empty_pipe_fails(self):
+        _auth()
+        with _patch_wrapper(_wrapper()):
+            result = runner.invoke(app, ["ingest"], input="")
+        assert result.exit_code != 0
+        assert "No text provided" in result.output
+
 
 class TestListInspectDeleteRelationsVerify:
     def test_list(self):
