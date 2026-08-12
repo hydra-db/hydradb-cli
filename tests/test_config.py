@@ -1,5 +1,7 @@
 """Tests for hydradb_cli.config module."""
 
+import json
+
 import pytest
 
 import hydradb_cli.config
@@ -78,6 +80,56 @@ class TestSaveAndReadConfig:
     def test_config_file_permissions(self, clean_config):
         save_config(api_key="secret")
         assert oct(clean_config.stat().st_mode)[-3:] == "600"
+
+
+class TestScopeKeyAliasing:
+    """Each scope is one slot, reachable under either spelling.
+
+    ``get_database``/``get_collection`` read the canonical key first, so writing
+    only the deprecated spelling onto a config that already carries the
+    canonical one would leave the old value in force while ``config set``
+    reported success.
+    """
+
+    def test_deprecated_key_overrides_existing_canonical(self, clean_config):
+        save_config(database="prod")
+        save_config(tenant_id="staging")
+        assert get_tenant_id() == "staging"
+
+    def test_canonical_key_overrides_existing_deprecated(self, clean_config):
+        save_config(tenant_id="prod")
+        save_config(database="staging")
+        assert get_tenant_id() == "staging"
+
+    def test_deprecated_collection_overrides_existing_canonical(self, clean_config):
+        save_config(collection="col-a")
+        save_config(sub_tenant_id="col-b")
+        assert get_sub_tenant_id() == "col-b"
+
+    def test_canonical_collection_overrides_existing_deprecated(self, clean_config):
+        save_config(sub_tenant_id="col-a")
+        save_config(collection="col-b")
+        assert get_sub_tenant_id() == "col-b"
+
+    def test_canonical_argument_wins_over_deprecated_in_one_call(self, clean_config):
+        save_config(database="canonical", tenant_id="deprecated")
+        assert get_tenant_id() == "canonical"
+        save_config(collection="canonical-col", sub_tenant_id="deprecated-col")
+        assert get_sub_tenant_id() == "canonical-col"
+
+    def test_both_spellings_written_for_older_cli_versions(self, clean_config):
+        """A config written here must stay readable by a CLI that only knows
+        the deprecated keys."""
+        save_config(database="prod", collection="col")
+        stored = json.loads(clean_config.read_text())
+        assert stored["database"] == stored["tenant_id"] == "prod"
+        assert stored["collection"] == stored["sub_tenant_id"] == "col"
+
+    def test_scope_write_leaves_other_values_alone(self, clean_config):
+        save_config(api_key="key1", base_url="https://api.example.com")
+        save_config(tenant_id="staging")
+        assert get_api_key() == "key1"
+        assert get_base_url() == "https://api.example.com"
 
 
 class TestEnvVarOverride:

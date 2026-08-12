@@ -140,19 +140,26 @@ def save_config(
     """Save configuration values to config file.
 
     ``database``/``collection`` are the canonical keys; ``tenant_id``/
-    ``sub_tenant_id`` are still accepted and written for back-compat.
+    ``sub_tenant_id`` are their deprecated spellings. Each scope is one slot
+    written under both spellings, so setting either name takes effect and a
+    file written here stays readable by older CLI versions. The canonical
+    argument wins when both are passed.
     """
     data = _read_config_file()
     if api_key is not None:
         data["api_key"] = api_key
-    if database is not None:
-        data["database"] = database
-    if collection is not None:
-        data["collection"] = collection
-    if tenant_id is not None:
-        data["tenant_id"] = tenant_id
-    if sub_tenant_id is not None:
-        data["sub_tenant_id"] = sub_tenant_id
+    # Write both spellings of each scope. Storing only the name the caller
+    # happened to use lets the other one shadow it: `get_database` reads
+    # `database` before `tenant_id`, so saving `tenant_id` alone onto a config
+    # that already has `database` would report success and change nothing.
+    database_value = database if database is not None else tenant_id
+    if database_value is not None:
+        data["database"] = database_value
+        data["tenant_id"] = database_value
+    collection_value = collection if collection is not None else sub_tenant_id
+    if collection_value is not None:
+        data["collection"] = collection_value
+        data["sub_tenant_id"] = collection_value
     if base_url is not None:
         data["base_url"] = base_url.rstrip("/")
     _write_config_file(data)

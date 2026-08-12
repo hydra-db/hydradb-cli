@@ -684,6 +684,33 @@ class TestAuthAndConfig:
         result = runner.invoke(app, ["config", "set", "bogus", "v"])
         assert result.exit_code != 0
 
+    def test_config_set_tenant_id_switches_scope_after_database_was_set(self):
+        """Switching scope with the deprecated key must actually switch it.
+
+        `config set` reports success either way, so a write that does not take
+        effect leaves later commands — including `delete` — pointed at the
+        previous database.
+        """
+        assert runner.invoke(app, ["config", "set", "database", "prod"]).exit_code == 0
+        assert runner.invoke(app, ["config", "set", "tenant_id", "staging"]).exit_code == 0
+        assert hydradb_cli.config.get_database() == "staging"
+        assert "staging" in runner.invoke(app, ["config", "show"]).output
+
+    def test_config_set_sub_tenant_id_switches_scope_after_collection_was_set(self):
+        assert runner.invoke(app, ["config", "set", "collection", "col-a"]).exit_code == 0
+        assert runner.invoke(app, ["config", "set", "sub_tenant_id", "col-b"]).exit_code == 0
+        assert hydradb_cli.config.get_collection() == "col-b"
+        assert "col-b" in runner.invoke(app, ["config", "show"]).output
+
+    def test_login_database_overrides_stale_deprecated_key(self):
+        """A config carrying only the old `tenant_id` must be re-scoped by login."""
+        save_config(api_key="k", tenant_id="prod")
+        w = _wrapper(**{"databases.readiness": {"infra": {"ready_for_ingestion": True}}})
+        with patch("hydradb_cli.commands.auth.build_wrapper", return_value=w):
+            result = runner.invoke(app, ["login", "--api-key", "k", "--database", "staging"])
+        assert result.exit_code == 0
+        assert hydradb_cli.config.get_database() == "staging"
+
     def test_config_show_json(self):
         result = runner.invoke(app, ["--output", "json", "config", "show"])
         assert result.exit_code == 0
