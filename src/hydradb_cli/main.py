@@ -15,6 +15,7 @@ Canonical commands:
     relations  Explore knowledge-graph relations
     verify     Check per-source ingestion status
     database   Manage databases
+    graph      Run Cypher against graph collections you own (BYOG)
     doctor     Check config and API reachability
     login / logout / config   Authentication and configuration
 
@@ -25,7 +26,7 @@ remains available as a deprecated alias.
 import typer
 
 from hydradb_cli import __version__
-from hydradb_cli.commands import auth, canonical, config_cmd, fetch, knowledge, memories, recall, tenant
+from hydradb_cli.commands import auth, canonical, config_cmd, fetch, graph, knowledge, memories, recall, tenant
 from hydradb_cli.output import console, set_output_format
 
 app = typer.Typer(
@@ -81,6 +82,12 @@ app.command(name="relations", help="Explore knowledge-graph relations.")(canonic
 app.command(name="verify", help="Check per-source ingestion status.")(canonical.verify)
 app.command(name="doctor", help="Check config and API reachability.")(canonical.doctor)
 app.add_typer(canonical.database_app, name="database", help="[bold]Database[/bold] management.")
+
+# ── Graph (BYOG) ─────────────────────────────────────────────────────────────
+# HydraDB's graph database offering: full Cypher over graph collections you own
+# end to end. A separate store from the memory/knowledge corpora above — nothing
+# crosses between them.
+app.add_typer(graph.app, name="graph", help="[bold]Graph[/bold] (Cypher) queries and collections.")
 
 # ── Auth + config ────────────────────────────────────────────────────────────
 app.command(name="login", help="Authenticate with HydraDB and save credentials.")(auth.login)

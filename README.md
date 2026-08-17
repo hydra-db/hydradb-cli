@@ -18,6 +18,7 @@ Command-line interface for [HydraDB](https://hydradb.com) — manage memories, r
   - [list / inspect / relations / verify](#list--inspect--relations--verify)
   - [delete](#delete)
   - [database](#database)
+  - [graph (Cypher / BYOG)](#graph-cypher--byog)
   - [doctor](#doctor)
   - [Deprecated aliases](#deprecated-aliases)
   - [login / logout](#login--logout)
@@ -322,6 +323,63 @@ hydradb database delete old-database --yes
 
 ---
 
+### graph (Cypher / BYOG)
+
+Full **Cypher** over graph collections you own end to end — HydraDB's graph database offering ([docs](https://docs.hydradb.com/essentials/v2/graph-collections-byog)).
+
+This is a **separate store** from memories and knowledge, and nothing crosses between them: `hydradb query` cannot see graph data, and `hydradb graph query` cannot see memories. Each collection is an independent graph; a query sees exactly one and never another's data.
+
+| Command | What it does | Key options |
+|---------|--------------|-------------|
+| `graph query <cypher>` | Runs Cypher against one collection | `--param k=v`, `--params-json`, `--read-only`, `--database`, `--collection` |
+| `graph schema` | Labels, relationship types, properties, connections | `--sample`, `--database`, `--collection` |
+| `graph collections` | Lists the graphs in a graph database | `--database` |
+| `graph load <file.json>` | Chunked, re-runnable bulk import | `--label`, `--key`, `--chunk` |
+| `graph database create <name>` | Creates a graph database (ready immediately) | — |
+| `graph database delete <name>` | Drops a database and every collection in it | `--yes` / `-y` |
+| `graph collection delete <name>` | Drops one collection and its data | `--database`, `--yes` / `-y` |
+
+```bash
+# Read
+hydradb graph query "MATCH (p:Person) RETURN p.name AS name ORDER BY name"
+
+# Parameters — always prefer these over string-building
+hydradb graph query "MATCH (p:Person {name: \$n})-[:KNOWS*1..3]->(f) RETURN DISTINCT f.name AS name" \
+  --param n=Alice
+
+# Refuse to run anything that writes, before it is sent
+hydradb graph query "MATCH (n) RETURN n" --read-only
+
+# What is actually in here?
+hydradb graph schema
+
+# Bulk import: chunked to fit the request cap, MERGEd so a re-run is safe
+hydradb graph load people.json --label Person --key ext_id
+
+# JSON out — the rows verbatim, so jq works directly
+hydradb graph query "MATCH (p:Person) RETURN p.name AS name" --output json | jq '.[].name'
+```
+
+Collections **auto-create on first write**, so there is no create-collection command.
+
+`--read-only` refuses a query containing a write clause *before* sending it. The check
+ignores string literals, comments and backticked identifiers, so
+`WHERE p.name = "CREATE something"` is correctly treated as a read.
+
+**Differences from Neo4j.** Each of these is rejected *before* execution, so a rejected
+query changes nothing and fails identically on retry:
+
+- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected — `CALL { ... }` subqueries are fine. Use `graph schema`, which derives the schema from plain Cypher rather than APOC.
+- `LOAD CSV` is rejected — pass rows through parameters, or use `graph load`.
+- Existence checks are bare pattern predicates (`WHERE (p)-[:KNOWS]->()`); `EXISTS { ... }` and `exists()` are not accepted.
+- `shortestPath` belongs in `RETURN`/`WITH`, not `MATCH p = ...`, and must be directed.
+- `EXPLAIN` / `PROFILE` **execute** the query rather than planning it.
+
+Requests are capped at 256 KiB (enforced locally, before upload) and large result sets
+are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.
+
+---
+
 ### doctor
 
 Reports your resolved configuration and whether the API is reachable.
@@ -393,6 +451,12 @@ hydradb config set base_url https://api.hydradb.com
 | `HYDRADB_COLLECTION` | Default collection (overrides config file) | `HYDRA_DB_SUB_TENANT_ID` |
 | `HYDRADB_BASE_URL` | API base URL (default `https://api.hydradb.com`) | `HYDRA_DB_BASE_URL`, `HYDRADB_API_URL` |
 | `HYDRADB_OUTPUT` | Default output format — `human` or `json` | — |
+| `HYDRADB_GRAPH_COLLECTION` | Default graph collection for `hydradb graph` (default `default`) | — |
+
+`HYDRADB_GRAPH_COLLECTION` deliberately does **not** fall back to
+`HYDRADB_COLLECTION`: a context collection names a memory/knowledge partition
+and means nothing to a graph, so inheriting it would silently point Cypher at a
+collection you never chose — which reads an empty graph rather than failing.
 
 The canonical `HYDRADB_*` name wins when both it and its deprecated alias are
 set. The CLI aliases only its own historical `HYDRA_DB_*` prefix — it does not

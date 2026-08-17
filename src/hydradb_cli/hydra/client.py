@@ -26,7 +26,12 @@ from hydra_db.core.api_error import ApiError
 from hydra_db.core.file import File
 from hydra_db.core.parse_error import ParsingError
 
-from hydradb_cli.hydra.errors import HydraDBClientError, translate_sdk_error
+from hydradb_cli.hydra.errors import HydraDBClientError, _stringify_body, translate_sdk_error
+
+# Restated rather than imported from ``config`` to keep this module free of a
+# dependency on CLI configuration — the wrapper is meant to be portable.
+DEFAULT_BASE_URL = "https://api.hydradb.com"
+DEFAULT_GRAPH_COLLECTION = "default"
 
 
 def _is_envelope(obj: Any) -> bool:
@@ -58,6 +63,24 @@ def _unwrap(obj: Any) -> Any:
         return data if data is not None else {}
     dumped = _dump(obj)
     return dumped if dumped is not None else {}
+
+
+def _unwrap_payload(body: Any) -> Any:
+    """Unwrap a raw JSON ``HandlerEnvelope`` returned by the non-SDK path.
+
+    The SDK hands back pydantic models, so :func:`_unwrap` inspects attributes.
+    The BYOG endpoints are called directly and return plain parsed JSON, so the
+    same envelope has to be recognised as a dict instead.
+
+    Unwrapping is by SHAPE, never by assumption (CONTRACT §2 rule 2): a value is
+    an envelope only when it carries ``data`` alongside one of its siblings.
+    ``data`` may legitimately be a list (every ``/byog/query`` result is one),
+    so an empty result must not be confused with a missing payload.
+    """
+    if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
+        data = body["data"]
+        return data if data is not None else {}
+    return body if body is not None else {}
 
 
 def _bool_str(value: bool | None) -> str | None:
@@ -366,11 +389,127 @@ class _Context(_Resource):
         return _unwrap(resp)
 
 
+class _Graph(_Resource):
+    """BYOG (Bring Your Own Graph) operations — full Cypher over graph collections.
+
+    Unlike every other resource here, this one does NOT go through the SDK: the
+    pinned ``hydradb-sdk==2.1.2`` exposes ``context``, ``databases``,
+    ``connectors`` and ``webhooks`` and has no ``byog`` resource at all, so the
+    ``/byog/*`` endpoints are unreachable through it.
+
+    It is still not a second client. It reuses the wrapper's own ``httpx``
+    dependency, unwraps the same ``HandlerEnvelope`` by shape, and raises the
+    same :class:`HydraDBClientError` with the same status codes, so
+    ``handle_api_error`` treats a BYOG failure exactly like an SDK one. When the
+    SDK grows a ``byog`` resource, this class is reimplemented over it and no
+    caller changes.
+    """
+
+    def _request(self, method: str, path: str, *, json_body: Any = None, params: dict | None = None) -> Any:
+        url = f"{self._w._base_url.rstrip('/')}{path}"
+        headers = {
+            "Authorization": f"Bearer {self._w._token}",
+            "Content-Type": "application/json",
+            # CONTRACT §2 rule 6. The SDK sends this on every call; a hand-rolled
+            # path that omitted it would silently get v1 behaviour from the same
+            # endpoints.
+            "API-Version": "2",
+        }
+        try:
+            response = httpx.request(
+                method,
+                url,
+                headers=headers,
+                json=json_body,
+                params=params,
+                timeout=self._w._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise translate_sdk_error(exc) from exc
+
+        try:
+            body = response.json() if response.content else None
+        except ValueError:
+            body = response.text or None
+
+        if response.is_error:
+            # Route through the same message extraction the SDK path uses, so a
+            # rejected Cypher query surfaces the compiler's own feedback rather
+            # than a bare status code.
+            raise HydraDBClientError(response.status_code, _stringify_body(body))
+
+        return _unwrap_payload(body)
+
+    def query(
+        self,
+        *,
+        query: str,
+        params: dict | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> list[dict]:
+        """Run Cypher against one collection (``POST /byog/query``).
+
+        Returns rows verbatim: a list of row dicts keyed by the query's RETURN
+        column names. A write with no RETURN yields ``[]``, which is a success
+        and must not be read as a failure.
+        """
+        body = {
+            "database": self._w._require_database(database),
+            "collection": collection or self._w.default_graph_collection,
+            "query": query,
+        }
+        if params:
+            body["params"] = params
+        rows = self._request("POST", "/byog/query", json_body=body)
+        return rows if isinstance(rows, list) else []
+
+    def create_database(self, *, database: str) -> dict:
+        """Create a graph database (``POST /byog/databases``). Ready immediately."""
+        result = self._request("POST", "/byog/databases", json_body={"database": database})
+        return result if isinstance(result, dict) else {}
+
+    def collections(self, *, database: str | None = None) -> list[str]:
+        """List the collections in a graph database (``GET /byog/collections``)."""
+        result = self._request(
+            "GET",
+            "/byog/collections",
+            params={"database": self._w._require_database(database)},
+        )
+        if isinstance(result, dict) and isinstance(result.get("collections"), list):
+            return result["collections"]
+        return []
+
+    def drop_collection(self, *, collection: str, database: str | None = None) -> dict:
+        """Drop one collection and all its data. Idempotent."""
+        result = self._request(
+            "DELETE",
+            "/byog/collections",
+            json_body={"database": self._w._require_database(database), "collection": collection},
+        )
+        return result if isinstance(result, dict) else {}
+
+    def drop_database(self, *, database: str | None = None) -> dict:
+        """Drop a graph database and every collection in it.
+
+        ``deleted`` is ``False`` when the database was created through the
+        standard database API and merely holds graph collections — in that case
+        only the collections go. Callers must report that distinction rather
+        than smoothing it over.
+        """
+        result = self._request(
+            "DELETE",
+            "/byog/databases",
+            json_body={"database": self._w._require_database(database)},
+        )
+        return result if isinstance(result, dict) else {}
+
+
 class HydraDB:
     """Canonical, hand-owned wrapper around the generated ``hydra_db`` SDK.
 
-    Exposes :attr:`databases` and :attr:`context` sub-resources whose method
-    names follow the shared contract's canonical vocabulary.
+    Exposes :attr:`databases`, :attr:`context` and :attr:`graph` sub-resources
+    whose method names follow the shared contract's canonical vocabulary.
     """
 
     def __init__(
@@ -380,13 +519,25 @@ class HydraDB:
         base_url: str | None = None,
         database: str | None = None,
         collection: str | None = None,
+        graph_collection: str | None = None,
         timeout: float = 60.0,
     ):
         self._sdk = _SdkHydraDB(token=token, base_url=base_url, timeout=timeout)
         self.default_database = database
         self.default_collection = collection
+        # A graph collection is a different namespace from a context collection:
+        # the same database can hold both, and Cypher aimed at the wrong one
+        # reads an empty graph rather than failing. So it is scoped separately
+        # and never falls back to `default_collection`.
+        self.default_graph_collection = graph_collection or DEFAULT_GRAPH_COLLECTION
+        # The BYOG path is hand-rolled rather than an SDK call, so it needs the
+        # raw credentials and base URL the SDK client keeps to itself.
+        self._token = token
+        self._base_url = base_url or DEFAULT_BASE_URL
+        self._timeout = timeout
         self.databases = _Databases(self)
         self.context = _Context(self)
+        self.graph = _Graph(self)
 
     def _require_database(self, database: str | None) -> str:
         db = database or self.default_database

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`hydradb graph` — full Cypher over graph collections you own (BYOG).** HydraDB's graph database offering had no CLI surface at all: `query`, `ingest` and the rest address the memory and knowledge corpora, and the property graphs users model and own end to end were reachable only through the raw API. This adds `graph query`, `graph schema`, `graph collections`, `graph load`, `graph database create/delete` and `graph collection delete`. Everything existing is untouched — the two stores are separate, and nothing crosses between them.
+
+  `graph query` takes parameters through `--param k=v` (values parse as JSON when they can, so `--param n=3` is the number 3) or `--params-json`. `--output json` prints the rows verbatim, so `hydradb graph query ... | jq '.[].name'` works without unwrapping an envelope.
+
+  `--read-only` refuses a query containing a write clause *before* sending it. The check strips string literals, comments and backticked identifiers first, so `WHERE p.name = "CREATE something"` is correctly treated as a read — a naive keyword scan (which is what Neo4j's own MCP does) refuses that query, and HydraDB accepts it.
+
+  `graph schema` derives the schema from five plain aggregate queries rather than calling a procedure, because HydraDB rejects `CALL db.*` and `CALL apoc.*` outright. Counts are exact; property keys and connections come from a sample, and the output says so rather than letting a partial answer read as exhaustive.
+
+  `graph load` chunks a JSON file into batches that fit inside the 256 KiB request cap and the 30s write budget, and `MERGE`s on a key you supply so a load that fails part-way is safe to re-run — a bare `CREATE` would duplicate every row of an already-applied chunk. Rows missing the merge key, an unsafe `--label`, and batches that would exceed the cap are all rejected before anything is sent, so a load never half-applies.
+
+  Constructs HydraDB rejects before execution (`CALL` procedures, `LOAD CSV`) are caught locally and answered with the reason and the supported alternative. Nothing executes either way, so a local failure is immediate and specific where the remote one is neither.
+
+  Both destructive commands (`graph database delete`, `graph collection delete`) confirm unless `--yes` is given. `graph database delete` distinguishes a full drop from the case where only the graph collections went because the database was created through the standard database API — reporting that as a full drop would say something is gone that is still there.
+
+- **`HYDRADB_GRAPH_COLLECTION`** sets the default graph collection (default `default`). It deliberately does not fall back to `HYDRADB_COLLECTION`: a context collection names a memory/knowledge partition and means nothing to a graph, so inheriting it would silently point Cypher at a collection you never chose.
+
+### Internal
+
+- `HydraDB.graph` is a hand-rolled `httpx` path rather than an SDK call: the pinned `hydradb-sdk==2.1.2` exposes `context`, `databases`, `connectors` and `webhooks` and has no `byog` resource, so those endpoints are unreachable through it. It reuses the wrapper's existing envelope unwrapping and error translation and raises the same `HydraDBClientError`, so `handle_api_error` treats a BYOG failure exactly like an SDK one. When the SDK grows a `byog` resource, that one class is reimplemented over it and no caller changes. The exact SDK pin (CONTRACT S2 rule 1) is unaffected — there is no generated name to be insulated from yet.
+
 ## 0.2.0 — 2026-07-31
 
 ### Removed
