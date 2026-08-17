@@ -16,6 +16,7 @@ Canonical commands:
     verify     Check per-source ingestion status
     database   Manage databases
     graph      Run Cypher against graph collections you own (BYOG)
+    connectors Sync external sources (Slack, GitHub, Notion, …)
     doctor     Check config and API reachability
     login / logout / config   Authentication and configuration
 
@@ -26,7 +27,18 @@ remains available as a deprecated alias.
 import typer
 
 from hydradb_cli import __version__
-from hydradb_cli.commands import auth, canonical, config_cmd, fetch, graph, knowledge, memories, recall, tenant
+from hydradb_cli.commands import (
+    auth,
+    canonical,
+    config_cmd,
+    connectors,
+    fetch,
+    graph,
+    knowledge,
+    memories,
+    recall,
+    tenant,
+)
 from hydradb_cli.output import console, set_output_format
 
 app = typer.Typer(
@@ -88,6 +100,12 @@ app.add_typer(canonical.database_app, name="database", help="[bold]Database[/bol
 # end to end. A separate store from the memory/knowledge corpora above — nothing
 # crosses between them.
 app.add_typer(graph.app, name="graph", help="[bold]Graph[/bold] (Cypher) queries and collections.")
+
+# ── Connectors ───────────────────────────────────────────────────────────────
+# Managed integrations that sync external sources (Slack, GitHub, Notion, Jira,
+# Google Drive, …) into a database. Lifecycle: create -> discover -> configure
+# -> sync; once synced, the data is reachable through the ordinary `query`.
+app.add_typer(connectors.app, name="connectors", help="[bold]Connectors[/bold] — sync external sources.")
 
 # ── Auth + config ────────────────────────────────────────────────────────────
 app.command(name="login", help="Authenticate with HydraDB and save credentials.")(auth.login)

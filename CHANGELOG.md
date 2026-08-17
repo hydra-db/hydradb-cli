@@ -23,6 +23,26 @@
 ### Internal
 
 - `HydraDB.graph` is a hand-rolled `httpx` path rather than an SDK call: the pinned `hydradb-sdk==2.1.2` exposes `context`, `databases`, `connectors` and `webhooks` and has no `byog` resource, so those endpoints are unreachable through it. It reuses the wrapper's existing envelope unwrapping and error translation and raises the same `HydraDBClientError`, so `handle_api_error` treats a BYOG failure exactly like an SDK one. When the SDK grows a `byog` resource, that one class is reimplemented over it and no caller changes. The exact SDK pin (CONTRACT S2 rule 1) is unaffected — there is no generated name to be insulated from yet.
+- **`hydradb connectors` — manage the integrations that sync external sources.** Connectors (Slack, GitHub, Notion, Jira, Google Drive, Gmail, HubSpot and 30+ more) could be created from the dashboard and the raw API, but had no CLI surface. This adds the full documented lifecycle — create → discover → configure → sync → poll — plus `providers`, `list`, `get`, `status`, `resources`, `resource add/remove`, `rotate-credentials` and `delete`. Everything existing is untouched.
+
+  `connectors providers` reads the catalogue **from the API**, never from a hardcoded list, so newly supported providers appear without a CLI upgrade. `connectors providers <name>` shows that provider's credential schema alongside the fields it makes filterable (with the `filter_key` you pass to a query's metadata filters) and searchable — noting that searchable fields are folded into one combined text index and cannot be targeted individually.
+
+  `connectors status` renders the sync telemetry the API already carries — last successful and attempted sync, next sync, interval, cycles completed, documents dispatched, active resources — with timestamps as ages, because "12m ago" answers the question someone actually ran the command to settle. A connector with no active resources is called out explicitly, since that is the usual cause of "it synced but nothing appeared".
+
+- **`HYDRADB_CONNECTOR_CREDENTIALS`** supplies connector credentials non-interactively.
+
+### Security
+
+- **Connector credentials are never accepted as a command-line argument.** There is deliberately no `--credentials` flag: a secret in `argv` lands in shell history and is visible to every user on the machine via `ps`, and neither is undoable after the fact. Credentials come from `--credentials-stdin`, from `HYDRADB_CONNECTOR_CREDENTIALS`, or from a hidden interactive prompt driven by the provider's own credential schema — so the prompt asks for exactly the fields that provider requires, and a missing one is named locally instead of failing at create time.
+
+- **Credential values are never echoed back**, in any output mode including `--output json`. Redaction covers nested structures and applies to error paths too. It deliberately does *not* touch the credential *schema* (public metadata describing which fields are needed) or `filter_key` (a field name users need in order to write query filters) — redacting those would corrupt correct output without protecting anything, since the actual secret is always a leaf value.
+
+### Internal
+
+- The wrapper gains a `connectors` resource exposing canonical verbs over the SDK's generated names. This is where CONTRACT S2's firewall is most visibly earned: the SDK's method for rotating a stored credential is generated from OpenAPI summary text and is called `rotate_a_connectors_stored_o_auth_refresh_token`. It is now referenced on exactly one line, behind `rotate_credentials`.
+- `_invoke` accepts positional arguments. The connector methods take their path parameters positionally (`connectors.get(id)`, `connectors.delete_resource(id, resource_id)`) unlike the keyword-only database and context methods; without this every one of them raised `TypeError` before a request was built.
+- `GET /connectors/providers` has no SDK method, so it goes over a small raw HTTP path that sends the same auth and `API-Version: 2` headers, unwraps by shape, and raises the same `HydraDBClientError` — indistinguishable to callers and to `handle_api_error`.
+- Connector responses are mostly **not** enveloped (`GET /connectors` returns a bare `{"connectors": [...]}`). The existing shape check already handled that; it is now covered by a test, because assuming the envelope here would silently report "no connectors" for a populated account.
 
 ## 0.2.0 — 2026-07-31
 
