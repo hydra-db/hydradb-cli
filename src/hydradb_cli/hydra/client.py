@@ -96,12 +96,20 @@ class _Resource:
     def __init__(self, wrapper: HydraDB):
         self._w = wrapper
 
-    def _invoke(self, fn: Callable[..., Any], **kwargs: Any) -> Any:
+    def _invoke(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Call an SDK method, dropping ``None`` kwargs so the SDK's own OMIT
-        defaults apply, and translating any SDK/transport error."""
+        defaults apply, and translating any SDK/transport error.
+
+        Positional arguments pass through untouched. The connector methods take
+        their path parameters positionally (``connectors.get(id)``,
+        ``connectors.delete_resource(id, resource_id)``), unlike the
+        database/context methods which are keyword-only — and unlike kwargs,
+        a positional is never dropped, which is right: a path parameter is
+        never optional.
+        """
         clean = {k: v for k, v in kwargs.items() if v is not None}
         try:
-            return fn(**clean)
+            return fn(*args, **clean)
         except (ApiError, ParsingError, httpx.HTTPError) as exc:
             raise translate_sdk_error(exc) from exc
 
@@ -505,11 +513,168 @@ class _Graph(_Resource):
         return result if isinstance(result, dict) else {}
 
 
+class _Connectors(_Resource):
+    """Managed integrations that sync external sources into a database.
+
+    This resource is where CONTRACT §2's firewall earns its keep most visibly:
+    the SDK's method for rotating a stored credential is generated from OpenAPI
+    summary text and is called
+    ``rotate_a_connectors_stored_o_auth_refresh_token``. That name is one
+    regeneration away from changing, and no CLI command should ever reference
+    it. Every method here exposes the canonical verb and maps to whatever the
+    SDK currently calls it.
+
+    The documented lifecycle is create → discover → configure → sync → poll →
+    query → delete.
+    """
+
+    def providers(self) -> list[dict]:
+        """The provider catalogue (``GET /connectors/providers``).
+
+        Read from the API rather than hardcoded: the catalogue gains providers
+        without a CLI release, and a baked-in list would quietly become a lie
+        that tells users a supported provider does not exist.
+
+        The SDK has no method for this endpoint — its ``connectors.list``
+        ``provider`` argument filters *connectors*, not the catalogue — so this
+        one call goes over raw HTTP. It still returns through the same error
+        translation as every other method here.
+        """
+        result = self._w._raw_get("/connectors/providers")
+        if isinstance(result, dict) and isinstance(result.get("providers"), list):
+            return result["providers"]
+        return []
+
+    def provider(self, provider_id: str) -> dict:
+        """One provider's credential schema and searchable/filterable fields."""
+        result = self._w._raw_get("/connectors/providers", params={"id": provider_id})
+        return result if isinstance(result, dict) else {}
+
+    def list(self, *, provider: str | None = None) -> list[dict]:
+        """List connectors for the organisation.
+
+        Note the response is NOT enveloped — it is a bare ``{"connectors": [...]}``.
+        ``_unwrap`` checks for the envelope shape rather than assuming it
+        (CONTRACT §2 rule 2), which is exactly why that check exists: assuming
+        the envelope here would silently return ``{}``.
+        """
+        resp = self._invoke(self._w._sdk.connectors.list, provider=provider)
+        data = _unwrap_payload(_unwrap(resp))
+        if isinstance(data, dict) and isinstance(data.get("connectors"), list):
+            return data["connectors"]
+        return []
+
+    def get(self, connector_id: str) -> dict:
+        resp = self._invoke(self._w._sdk.connectors.get, connector_id)
+        return _unwrap(resp)
+
+    def create(
+        self,
+        *,
+        provider: str,
+        name: str | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+        provider_account_scope: str | None = None,
+        credentials: dict | None = None,
+        auth_type: str | None = None,
+        sync_interval_seconds: int | None = None,
+    ) -> dict:
+        resp = self._invoke(
+            self._w._sdk.connectors.create,
+            provider=provider,
+            name=name,
+            database=self._w._require_database(database),
+            collection=self._w._resolve_collection(collection),
+            provider_account_scope=provider_account_scope,
+            credentials=credentials,
+            auth_type=auth_type,
+            sync_interval_seconds=sync_interval_seconds,
+        )
+        return _unwrap(resp)
+
+    def delete(self, connector_id: str) -> dict:
+        resp = self._invoke(self._w._sdk.connectors.delete, connector_id)
+        return _unwrap(resp)
+
+    def discover(self, connector_id: str, *, cursor: str | None = None, limit: int | None = None) -> dict:
+        """List resources available from the provider, before configuring any."""
+        resp = self._invoke(self._w._sdk.connectors.discover, connector_id, cursor=cursor, limit=limit)
+        return _unwrap(resp)
+
+    def configure(
+        self,
+        connector_id: str,
+        *,
+        resources: list[dict],
+        lookback_days: int | None = None,
+    ) -> dict:
+        """Activate resources and set sync options."""
+        resp = self._invoke(
+            self._w._sdk.connectors.configure,
+            connector_id,
+            resources=resources,
+            lookback_days=lookback_days,
+        )
+        return _unwrap(resp)
+
+    def resources(self, connector_id: str) -> list[dict]:
+        """Configured resources and their per-resource sync state."""
+        resp = self._invoke(self._w._sdk.connectors.list_resources, connector_id)
+        data = _unwrap_payload(_unwrap(resp))
+        if isinstance(data, dict) and isinstance(data.get("resources"), list):
+            return data["resources"]
+        return data if isinstance(data, list) else []
+
+    def add_resource(
+        self,
+        connector_id: str,
+        *,
+        resource_id: str,
+        resource_type: str | None = None,
+        display_name: str | None = None,
+        collection_override: str | None = None,
+    ) -> dict:
+        resp = self._invoke(
+            self._w._sdk.connectors.create_resource,
+            connector_id,
+            resource_id=resource_id,
+            resource_type=resource_type,
+            display_name=display_name,
+            collection_override=collection_override,
+        )
+        return _unwrap(resp)
+
+    def remove_resource(self, connector_id: str, resource_id: str) -> dict:
+        resp = self._invoke(self._w._sdk.connectors.delete_resource, connector_id, resource_id)
+        return _unwrap(resp)
+
+    def sync(self, connector_id: str) -> dict:
+        """Trigger an on-demand sync cycle."""
+        resp = self._invoke(self._w._sdk.connectors.sync, connector_id)
+        return _unwrap(resp)
+
+    def rotate_credentials(self, connector_id: str, *, credentials: dict) -> dict:
+        """Replace a connector's stored credentials.
+
+        The SDK spells this ``rotate_a_connectors_stored_o_auth_refresh_token``.
+        That name is generated from summary text and is precisely the kind of
+        churn the wrapper exists to absorb, so it is confined to this one line.
+        """
+        resp = self._invoke(
+            self._w._sdk.connectors.rotate_a_connectors_stored_o_auth_refresh_token,
+            connector_id,
+            request=credentials,
+        )
+        return _unwrap(resp)
+
+
 class HydraDB:
     """Canonical, hand-owned wrapper around the generated ``hydra_db`` SDK.
 
-    Exposes :attr:`databases`, :attr:`context` and :attr:`graph` sub-resources
-    whose method names follow the shared contract's canonical vocabulary.
+    Exposes :attr:`databases`, :attr:`context`, :attr:`graph` and
+    :attr:`connectors` sub-resources whose method names follow the shared
+    contract's canonical vocabulary.
     """
 
     def __init__(
@@ -538,6 +703,45 @@ class HydraDB:
         self.databases = _Databases(self)
         self.context = _Context(self)
         self.graph = _Graph(self)
+        self.connectors = _Connectors(self)
+
+    def _raw_get(self, path: str, *, params: dict | None = None) -> Any:
+        """GET an endpoint the SDK does not expose, with the same error contract.
+
+        Used only for ``/connectors/providers``. It sends the same auth and
+        ``API-Version: 2`` headers the SDK does, unwraps the envelope by shape,
+        and raises the same :class:`HydraDBClientError`, so a caller cannot tell
+        it apart from an SDK call and ``handle_api_error`` works unchanged.
+        """
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            # CONTRACT §2 rule 6 — omitting this would silently get v1 behaviour.
+            "API-Version": "2",
+        }
+        try:
+            response = httpx.get(
+                f"{self._base_url.rstrip('/')}{path}",
+                headers=headers,
+                params=params,
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise translate_sdk_error(exc) from exc
+
+        try:
+            body = response.json() if response.content else None
+        except ValueError:
+            body = response.text or None
+
+        if response.is_error:
+            raise HydraDBClientError(response.status_code, _stringify_body(body))
+
+        # Unwrap by SHAPE, never by assumption: the connector endpoints mostly
+        # return bare objects rather than a HandlerEnvelope.
+        if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
+            data = body["data"]
+            return data if data is not None else {}
+        return body if body is not None else {}
 
     def _require_database(self, database: str | None) -> str:
         db = database or self.default_database

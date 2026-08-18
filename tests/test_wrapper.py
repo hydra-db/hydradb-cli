@@ -195,3 +195,99 @@ class TestErrorTranslation:
         assert translate_sdk_error(err).status_code == 400
         assert translate_sdk_error(NotFoundError(body={"x": 1})).status_code == 404
         assert translate_sdk_error(ApiError(status_code=503, body="down")).status_code == 503
+
+
+class TestConnectors:
+    """The connector surface, including the two things that make it different.
+
+    Connector responses are mostly NOT enveloped, and the SDK's method names on
+    this resource are the least stable in the whole API.
+    """
+
+    def test_list_handles_a_non_enveloped_response(self):
+        """`GET /connectors` returns a bare {"connectors": [...]}.
+
+        ``_unwrap`` checks for the envelope shape rather than assuming it
+        (CONTRACT S2 rule 2). This test fails if that ever becomes an
+        assumption, because unwrapping a non-envelope would silently return {}
+        and the CLI would report "no connectors" for a populated account.
+        """
+        w = _wrapper_with_response({"connectors": [{"connector_id": "c1", "provider": "slack"}]})
+        assert w.connectors.list() == [{"connector_id": "c1", "provider": "slack"}]
+
+    def test_list_also_handles_an_enveloped_response(self):
+        """If the endpoint ever starts enveloping, the wrapper must still cope."""
+        w = _wrapper_with_response({"success": True, "meta": {}, "data": {"connectors": [{"connector_id": "c2"}]}})
+        assert w.connectors.list() == [{"connector_id": "c2"}]
+
+    def test_list_of_an_unexpected_shape_is_an_empty_list_not_a_crash(self):
+        w = _wrapper_with_response({"unexpected": True})
+        assert w.connectors.list() == []
+
+    def test_get_passes_the_id_positionally(self):
+        """Connector methods take path params positionally, unlike the rest.
+
+        ``_invoke`` used to accept keyword arguments only, which made every one
+        of these raise TypeError before a request was ever built.
+        """
+        captured = {}
+        w = _wrapper_with_response({"connector_id": "c1"}, captured=captured)
+        assert w.connectors.get("c1") == {"connector_id": "c1"}
+        assert captured["request"].url.path.endswith("/connectors/c1")
+
+    def test_delete_resource_passes_both_path_params(self):
+        captured = {}
+        w = _wrapper_with_response({}, captured=captured)
+        w.connectors.remove_resource("c1", "r1")
+        assert captured["request"].url.path.endswith("/connectors/c1/resources/r1")
+
+    def test_rotate_credentials_hides_the_generated_sdk_name(self):
+        """The SDK spells this `rotate_a_connectors_stored_o_auth_refresh_token`.
+
+        That name is generated from OpenAPI summary text and is exactly the
+        churn CONTRACT S2 exists to absorb, so it must appear nowhere outside
+        the wrapper.
+        """
+        captured = {}
+        w = _wrapper_with_response({}, captured=captured)
+        w.connectors.rotate_credentials("c1", credentials={"access_token": "x"})
+        assert captured["request"].url.path.endswith("/connectors/c1/credentials")
+
+    def test_providers_reads_the_catalogue_over_raw_http(self):
+        """The SDK has no method for /connectors/providers."""
+        captured = {}
+        w = _wrapper_with_response({"providers": [{"provider": "slack"}]}, captured=captured)
+        # The raw path uses httpx directly, so point it at the same mock.
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"providers": [{"provider": "slack"}]})
+        )
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                assert w.connectors.providers() == [{"provider": "slack"}]
+            finally:
+                httpx.get = original
+
+    def test_provider_catalogue_error_becomes_a_client_error(self):
+        transport = httpx.MockTransport(lambda request: httpx.Response(404, json={"message": "nope"}))
+        w = HydraDB(token="x", base_url="http://test.local", database="db_test")
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                with pytest.raises(HydraDBClientError) as exc:
+                    w.connectors.providers()
+            finally:
+                httpx.get = original
+        assert exc.value.status_code == 404

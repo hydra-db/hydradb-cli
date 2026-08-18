@@ -86,9 +86,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Test/conformance fixtures pass dummy tokens to the SDK wrapper.
-"tests/**" = ["S106"]
-"conformance/**" = ["S106"]
+# Test/conformance fixtures pass dummy tokens to the SDK wrapper. S105 covers the
+# same thing bound to a local first — the connector tests need a credential-shaped
+# literal precisely in order to assert it is never echoed back.
+"tests/**" = ["S105", "S106"]
+"conformance/**" = ["S105", "S106"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["hydradb_cli"]

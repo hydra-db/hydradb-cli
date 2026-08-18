@@ -19,6 +19,7 @@ Command-line interface for [HydraDB](https://hydradb.com) — manage memories, r
   - [delete](#delete)
   - [database](#database)
   - [graph (Cypher / BYOG)](#graph-cypher--byog)
+  - [connectors](#connectors)
   - [doctor](#doctor)
   - [Deprecated aliases](#deprecated-aliases)
   - [login / logout](#login--logout)
@@ -379,6 +380,65 @@ query changes nothing and fails identically on retry:
 
 Requests are capped at 256 KiB (enforced locally, before upload) and large result sets
 are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.
+### connectors
+
+Managed integrations that sync external sources — Slack, GitHub, Notion, Jira, Google Drive, Gmail, HubSpot and [many more](https://docs.hydradb.com/essentials/v2/connectors) — into a HydraDB database. Once synced, the data is reachable through the ordinary `hydradb query`.
+
+The lifecycle is **create → discover → configure → sync**.
+
+| Command | What it does | Key options |
+|---------|--------------|-------------|
+| `connectors providers [provider]` | Lists the provider catalogue, or one provider's credential schema and filterable fields | `--category`, `--supported/--all` |
+| `connectors list` | Lists connectors with their sync state | `--provider` |
+| `connectors get <id>` | Shows one connector | — |
+| `connectors status <id>` | Sync health: last run, cycles, documents dispatched | — |
+| `connectors create` | Creates a connector | `--provider`, `--name`, `--scope`, `--credentials-stdin`, `--sync-interval` |
+| `connectors discover <id>` | Lists resources the provider offers | `--limit`, `--cursor` |
+| `connectors configure <id>` | Activates resources and sets sync options | `--resource` / `-r`, `--resources-json`, `--lookback-days` |
+| `connectors resources <id>` | Lists configured resources and their fetch health | — |
+| `connectors resource add/remove` | Manages one resource row | `--type`, `--collection`, `--yes` |
+| `connectors sync <id>` | Triggers an on-demand sync | — |
+| `connectors rotate-credentials <id>` | Replaces stored credentials | `--credentials-stdin` |
+| `connectors delete <id>` | Deletes a connector | `--yes` / `-y` |
+
+```bash
+# What can I connect, and what does it need?
+hydradb connectors providers --category messaging
+hydradb connectors providers slack
+
+# Create — credentials are piped, never passed as an argument
+echo '{"access_token":"xoxb-..."}' | \
+  hydradb connectors create --provider slack --scope T01234ABC --credentials-stdin
+
+# See what is available, then activate a subset
+hydradb connectors discover <id>
+hydradb connectors configure <id> -r C123:channel -r C456:channel --lookback-days 60
+
+# Run a cycle now, then watch it
+hydradb connectors sync <id>
+hydradb connectors status <id>
+```
+
+**Credentials are never accepted as a command-line argument.** There is deliberately no
+`--credentials` flag: a secret in `argv` lands in shell history and is visible to any user
+on the machine via `ps`, and neither can be undone afterwards. Supply them by piping a JSON
+object with `--credentials-stdin`, by setting `HYDRADB_CONNECTOR_CREDENTIALS`, or
+interactively when prompted (input is hidden, and the prompt asks for exactly the fields
+that provider declares).
+
+Credential *values* are never echoed back either, in any output mode including
+`--output json`. The credential *schema* — which fields a provider needs — is public
+metadata and is shown in full.
+
+`--scope` is a stable external account identifier (a Slack workspace id, a GitHub org).
+Set it when you run more than one connector for the same provider, so documents from
+different accounts cannot collide.
+
+Syncing is **asynchronous**: `connectors sync` queues a cycle and returns. A query issued
+straight afterwards can legitimately return nothing — poll `connectors status` instead.
+
+The provider catalogue is served by the API and is never hardcoded in the CLI, so newly
+supported providers appear without upgrading.
 
 ---
 
@@ -454,6 +514,7 @@ hydradb config set base_url https://api.hydradb.com
 | `HYDRADB_BASE_URL` | API base URL (default `https://api.hydradb.com`) | `HYDRA_DB_BASE_URL`, `HYDRADB_API_URL` |
 | `HYDRADB_OUTPUT` | Default output format — `human` or `json` | — |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection for `hydradb graph` (default `default`) | — |
+| `HYDRADB_CONNECTOR_CREDENTIALS` | Connector credentials as a JSON object, for non-interactive `connectors create` | — |
 
 `HYDRADB_GRAPH_COLLECTION` deliberately does **not** fall back to
 `HYDRADB_COLLECTION`: a context collection names a memory/knowledge partition
