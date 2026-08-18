@@ -331,7 +331,7 @@ This is a **separate store** from memories and knowledge, and nothing crosses be
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `graph query <cypher>` | Runs Cypher against one collection | `--param k=v`, `--params-json`, `--read-only`, `--database`, `--collection` |
+| `graph query <cypher>` | Runs Cypher against one collection | `--param k=v`, `--params-json`, `--database`, `--collection` |
 | `graph collections` | Lists the graphs in a graph database | `--database` |
 | `graph load <file.json>` | Chunked, re-runnable bulk import | `--label`, `--key`, `--chunk` |
 | `graph database create <name>` | Creates a graph database (ready immediately) | — |
@@ -346,9 +346,6 @@ hydradb graph query "MATCH (p:Person) RETURN p.name AS name ORDER BY name"
 hydradb graph query "MATCH (p:Person {name: \$n})-[:KNOWS*1..3]->(f) RETURN DISTINCT f.name AS name" \
   --param n=Alice
 
-# Refuse to run anything that writes, before it is sent
-hydradb graph query "MATCH (n) RETURN n" --read-only
-
 # What is actually in here? There is no schema command — ask the graph itself.
 hydradb graph query "MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l"
 
@@ -361,14 +358,20 @@ hydradb graph query "MATCH (p:Person) RETURN p.name AS name" --output json | jq 
 
 Collections **auto-create on first write**, so there is no create-collection command.
 
-`--read-only` refuses a query containing a write clause *before* sending it. The check
-ignores string literals, comments and backticked identifiers, so
-`WHERE p.name = "CREATE something"` is correctly treated as a read.
+**The CLI does not inspect your Cypher.** There is no `--read-only` flag and no local
+pre-rejection of unsupported constructs: both would mean classifying Cypher text
+client-side, a heuristic that can only agree with the server or be wrong — and being
+wrong means refusing a query HydraDB would have run. Your query is sent verbatim and
+the server rules on it.
+
+The request cap and the `graph load` label/merge-key rules *are* checked locally,
+because those are transport and string-building facts the client owns rather than
+rules about what Cypher means.
 
 **Differences from Neo4j.** Each of these is rejected *before* execution, so a rejected
 query changes nothing and fails identically on retry:
 
-- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected — `CALL { ... }` subqueries are fine. There is no schema command and no `apoc.meta.schema()`; discover a collection's structure by querying it, as above.
+- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected **by the server**, before it executes anything — `CALL { ... }` subqueries are fine. There is no schema command and no `apoc.meta.schema()`; discover a collection's structure by querying it, as above.
 - `LOAD CSV` is rejected — pass rows through parameters, or use `graph load`.
 - Existence checks are bare pattern predicates (`WHERE (p)-[:KNOWS]->()`); `EXISTS { ... }` and `exists()` are not accepted.
 - `shortestPath` belongs in `RETURN`/`WITH`, not `MATCH p = ...`, and must be directed.

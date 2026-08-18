@@ -1,8 +1,7 @@
-"""Unit tests for the Cypher analysis used by the graph (BYOG) commands.
+"""Unit tests for the graph (BYOG) rendering, limits and name rules.
 
-These need no network and no wrapper: they cover the write detector that
-``--read-only`` rests on, the constructs HydraDB rejects before execution, the
-derived-schema queries, and result rendering.
+There is deliberately no Cypher analysis to test: the client does not classify
+or pre-judge queries, it sends them and lets the server rule on them.
 """
 
 import pytest
@@ -12,128 +11,9 @@ from hydradb_cli.cypher import (
     CYPHER_IDENTIFIER,
     MAX_BODY_BYTES,
     body_size,
-    is_write_query,
     render_value,
     rows_to_table,
-    strip_non_code,
-    unsupported_construct,
-    write_clauses_in,
 )
-
-# ── write detection ──────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        "MATCH (n) RETURN n",
-        "MATCH (p:Person)-[:KNOWS*1..3]->(f) RETURN DISTINCT f.name AS name",
-        "MATCH (a),(b) RETURN shortestPath((a)-[*..6]->(b)) AS p",
-        "MATCH (p:Person) WHERE (p)-[:KNOWS]->() RETURN p.name AS name",
-        "CALL { MATCH (p:Person) RETURN p.name AS n } RETURN n",
-        "MATCH (p:Person) RETURN p.name AS name ORDER BY name SKIP $offset LIMIT $limit",
-    ],
-)
-def test_reads_are_not_writes(query):
-    assert is_write_query(query) is False
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        "CREATE (n:Person {name: 'Alice'})",
-        "MERGE (n:Person {ext_id: 1})",
-        "MATCH (n) SET n.seen = true",
-        "MATCH (n) DELETE n",
-        "MATCH (n) DETACH DELETE n",
-        "MATCH (n) REMOVE n.tag",
-        "CREATE INDEX FOR (n:Person) ON (n.name)",
-        "DROP INDEX ON :Person(name)",
-        "MATCH (n) FOREACH (x IN [1] | SET n.k = x)",
-    ],
-)
-def test_writes_are_detected(query):
-    assert is_write_query(query) is True
-
-
-def test_write_keyword_inside_a_string_literal_is_not_a_write():
-    """The false positive that motivated a literal-aware detector.
-
-    Neo4j's own ``_is_write_query`` substring-scans the raw query and refuses
-    this one — a query HydraDB accepts and that mutates nothing (verified
-    against the live API).
-    """
-    query = 'MATCH (p:Person) WHERE p.name = "CREATE something" RETURN p.name AS name'
-    assert is_write_query(query) is False
-    assert write_clauses_in(query) == []
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        "MATCH (n) RETURN n // TODO: also CREATE an index",
-        "/* we used to MERGE here */ MATCH (n) RETURN n",
-        "MATCH (n) RETURN n.`delete` AS d",
-        "MATCH (n) WHERE n.note = 'please DELETE me' RETURN n",
-    ],
-)
-def test_write_keywords_in_comments_and_identifiers_are_not_writes(query):
-    assert is_write_query(query) is False
-
-
-def test_a_decoy_literal_does_not_hide_a_real_write():
-    """The literal must not blind the scan to the clause beside it."""
-    query = 'MATCH (p:Person) WHERE p.note = "do not DELETE" SET p.seen = true'
-    assert is_write_query(query) is True
-    assert write_clauses_in(query) == ["SET"]
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        "MATCH (n) RETURN n.createdAt AS c",  # contains CREATE
-        "MATCH (n) RETURN n.offset AS o",  # contains SET
-        "MATCH (n) RETURN n.dropped AS d",  # contains DROP
-    ],
-)
-def test_keywords_embedded_in_longer_words_are_not_matched(query):
-    assert is_write_query(query) is False
-
-
-def test_escaped_quote_does_not_end_a_literal_early():
-    # If the escaped quote terminated the string, the DELETE after it would be
-    # read as live code.
-    assert is_write_query(r"MATCH (n) WHERE n.s = 'it\'s DELETE time' RETURN n") is False
-
-
-def test_doubled_quote_does_not_end_a_literal_early():
-    assert is_write_query("MATCH (n) WHERE n.s = 'a '' DELETE b' RETURN n") is False
-
-
-def test_strip_preserves_length_so_offsets_stay_stable():
-    query = 'MATCH (n) WHERE n.s = "CREATE" RETURN n'
-    assert len(strip_non_code(query)) == len(query)
-
-
-# ── rejected constructs ──────────────────────────────────────────────────────
-
-
-def test_procedure_calls_are_named_but_subqueries_are_not():
-    assert unsupported_construct("CALL db.labels()")
-    assert unsupported_construct("CALL apoc.meta.schema()")
-    assert unsupported_construct("CALL { MATCH (n) RETURN n AS x } RETURN x") is None
-    assert unsupported_construct("CALL  { MATCH (n) RETURN n AS x } RETURN x") is None
-
-
-def test_load_csv_is_named_with_the_alternative():
-    message = unsupported_construct("LOAD CSV FROM 'file:///x.csv' AS row RETURN row")
-    assert message is not None
-    assert "parameters" in message or "params" in message
-
-
-def test_procedure_name_inside_a_literal_is_not_a_procedure_call():
-    assert unsupported_construct('MATCH (n) WHERE n.doc = "CALL db.labels()" RETURN n') is None
-
 
 # ── names and sizes ──────────────────────────────────────────────────────────
 

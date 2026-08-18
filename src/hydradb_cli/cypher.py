@@ -1,13 +1,23 @@
-"""Cypher analysis and rendering for the graph (BYOG) commands.
+"""Rendering and local limits for the graph (BYOG) commands.
 
-Three things that need no network, so they can be tested directly:
+Deliberately contains NO Cypher analysis. An earlier version lexed the query to
+classify reads vs writes and to pre-reject constructs the server refuses, which
+put a second, worse implementation of the server's rules inside a client: it
+could only ever agree with the server or be wrong, and being wrong meant
+refusing a query HydraDB would have run.
 
-  * deciding whether a query WRITES, so ``--read-only`` can refuse one;
-  * turning the server's row objects back into something readable.
+The server is the authority on what Cypher is valid and permitted. It rejects
+unsupported constructs before executing anything — verified: a query mixing
+CREATE with a procedure call leaves the node count unchanged — and its messages
+are more specific than the ones this module used to produce.
 
-Kept deliberately in step with the same logic in the MCP client
-(``src/cypher.ts`` there): the two clients wrap identical endpoints and must not
-disagree about what counts as a write.
+What is left is the work a client genuinely owns: turning the server's row
+objects into something readable, and the limits and name rules that are cheaper
+to check here than to discover from a remote error.
+
+Kept in step with the MCP's ``src/cypher.ts``, which was stripped the same way:
+the two clients wrap identical endpoints and must not diverge (CONTRACT §0,
+group 2).
 """
 
 from __future__ import annotations
@@ -15,28 +25,6 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-
-# Clauses that mutate the graph.
-#
-# ``ADD`` is deliberately absent even though Neo4j's own ``_is_write_query``
-# lists it: it is not a Cypher write clause, only part of ``SET n:Label`` /
-# ``ADD CONSTRAINT``, both already caught by a real member of this list.
-# Including it would reject ``MATCH (n) WHERE n.tag = 'add' ...`` for no reason.
-#
-# ``CREATE INDEX`` / ``DROP INDEX`` count as writes: they are schema changes,
-# they are billed against the 30s write budget, and a read-only caller has no
-# business issuing them.
-WRITE_CLAUSES = (
-    "CREATE",
-    "MERGE",
-    "SET",
-    "DELETE",
-    "DETACH",
-    "REMOVE",
-    "DROP",
-    "FOREACH",
-    "LOAD",
-)
 
 # The documented request-body ceiling for POST /byog/query.
 MAX_BODY_BYTES = 256 * 1024
@@ -61,136 +49,6 @@ COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 # Cypher can quote an identifier with backticks, but a caller who needs that is
 # better served writing their own MERGE than having one built for them.
 CYPHER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
-
-
-def strip_non_code(query: str) -> str:
-    """Blank out everything that is not executable Cypher.
-
-    This is the whole reason the detector is not a substring scan. Neo4j's MCP
-    checks ``any(keyword in query.upper() for keyword in [...])``, so::
-
-        MATCH (p:Person) WHERE p.name = "CREATE something" RETURN p.name
-
-    is classified as a write and refused — a query HydraDB accepts and that
-    mutates nothing. The same happens to a comment mentioning a write, and to a
-    property literally named ``\\`delete\\```.
-
-    Replacing with spaces rather than deleting keeps every offset stable, so a
-    keyword sitting against a stripped region cannot be fused with its
-    neighbour into a different token.
-
-    Handles single- and double-quoted strings (with backslash and doubled
-    escapes), backtick-quoted identifiers, ``//`` line comments and ``/* */``
-    block comments.
-    """
-    out: list[str] = []
-    i = 0
-    length = len(query)
-
-    while i < length:
-        ch = query[i]
-        nxt = query[i + 1] if i + 1 < length else ""
-
-        # Line comment — runs to the newline, which is preserved.
-        if ch == "/" and nxt == "/":
-            while i < length and query[i] != "\n":
-                out.append(" ")
-                i += 1
-            continue
-
-        # Block comment. An unterminated one blanks the rest, which is correct:
-        # the server rejects the query anyway, and everything after an unclosed
-        # opener reads as a comment.
-        if ch == "/" and nxt == "*":
-            out.append("  ")
-            i += 2
-            while i < length and not (query[i] == "*" and i + 1 < length and query[i + 1] == "/"):
-                out.append("\n" if query[i] == "\n" else " ")
-                i += 1
-            if i < length:
-                out.append("  ")
-                i += 2
-            continue
-
-        # Quoted region: string literal or backticked identifier.
-        if ch in ("'", '"', "`"):
-            quote = ch
-            out.append(" ")
-            i += 1
-            while i < length:
-                # Backslash escape. Backticked identifiers escape by doubling
-                # rather than with backslashes, but consuming the pair is still
-                # safe there.
-                if query[i] == "\\" and quote != "`":
-                    out.append("  " if i + 1 < length else " ")
-                    i += 2
-                    continue
-                if query[i] == quote:
-                    # A doubled quote is an escaped quote, not a terminator.
-                    if i + 1 < length and query[i + 1] == quote:
-                        out.append("  ")
-                        i += 2
-                        continue
-                    out.append(" ")
-                    i += 1
-                    break
-                out.append("\n" if query[i] == "\n" else " ")
-                i += 1
-            continue
-
-        out.append(ch)
-        i += 1
-
-    return "".join(out)
-
-
-def write_clauses_in(query: str) -> list[str]:
-    """The write clauses a query actually uses, in the order they appear."""
-    code = strip_non_code(query).upper()
-    # ``\b`` on both sides so SET does not match OFFSET and CREATE does not
-    # match a variable called createdAt.
-    return [clause for clause in WRITE_CLAUSES if re.search(rf"\b{clause}\b", code)]
-
-
-def is_write_query(query: str) -> bool:
-    """Whether this query mutates the graph.
-
-    Conservative in one direction only: it may call a read a write, and the
-    cost of that is being told to drop ``--read-only``. The reverse — calling a
-    write a read — must never happen, because that is what the guarantee rests
-    on.
-    """
-    return bool(write_clauses_in(query))
-
-
-def unsupported_construct(query: str) -> str | None:
-    """Name a construct HydraDB rejects *before* running anything.
-
-    Both of these fail with a 400 at validation time, so nothing executes
-    either way. Catching them locally gives the reason and the alternative in
-    one step, immediately, instead of a remote error to interpret — and
-    retrying either unchanged fails identically.
-    """
-    code = strip_non_code(query)
-
-    # ``CALL { ... }`` subqueries ARE supported; ``CALL some.procedure(...)`` is
-    # not. The distinction is the token after CALL, not the bare keyword.
-    call = re.search(r"\bCALL\s*(\{)?", code, re.IGNORECASE)
-    if call and call.group(1) is None:
-        return (
-            "HydraDB rejects procedure calls (CALL db.*, CALL apoc.*) before running them. "
-            "CALL { ... } subqueries are supported."
-        )
-
-    if re.search(r"\bLOAD\s+CSV\b", code, re.IGNORECASE):
-        return (
-            "HydraDB rejects LOAD CSV — it does not load files or URLs server-side. "
-            "Pass rows through parameters instead, e.g. "
-            "'UNWIND $rows AS row MERGE (n:Thing {id: row.id}) SET n += row', "
-            "or use 'hydradb graph load'."
-        )
-
-    return None
 
 
 def body_size(payload: dict[str, Any]) -> int:

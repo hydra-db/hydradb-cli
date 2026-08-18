@@ -8,13 +8,13 @@
 
   `graph query` takes parameters through `--param k=v` (values parse as JSON when they can, so `--param n=3` is the number 3) or `--params-json`. `--output json` prints the rows verbatim, so `hydradb graph query ... | jq '.[].name'` works without unwrapping an envelope.
 
-  `--read-only` refuses a query containing a write clause *before* sending it. The check strips string literals, comments and backticked identifiers first, so `WHERE p.name = "CREATE something"` is correctly treated as a read — a naive keyword scan (which is what Neo4j's own MCP does) refuses that query, and HydraDB accepts it.
+  **The CLI does not inspect your Cypher.** There is no `--read-only` flag and no local pre-rejection of unsupported constructs: both would put a second, worse implementation of the server's rules inside a client, able only to agree with the server or to be wrong — and being wrong means refusing a query HydraDB would have run. The server rejects unsupported constructs before executing anything (verified: a query mixing `CREATE` with a procedure call leaves the node count unchanged) and its messages are more specific than the ones the CLI used to produce. Queries are sent verbatim.
 
   There is deliberately **no** `graph schema` command. HydraDB rejects `CALL db.*` and `CALL apoc.*` outright, and a derived schema is not part of the product — callers discover a collection's structure by querying it (`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l`), which the help text and README both show.
 
   `graph load` chunks a JSON file into batches that fit inside the 256 KiB request cap and the 30s write budget, and `MERGE`s on a key you supply so a load that fails part-way is safe to re-run — a bare `CREATE` would duplicate every row of an already-applied chunk. Rows missing the merge key, an unsafe `--label`, and batches that would exceed the cap are all rejected before anything is sent, so a load never half-applies.
 
-  Constructs HydraDB rejects before execution (`CALL` procedures, `LOAD CSV`) are caught locally and answered with the reason and the supported alternative. Nothing executes either way, so a local failure is immediate and specific where the remote one is neither.
+  The 256 KiB request cap and the label/merge-key name rules ARE checked locally, because those are transport and string-building facts the client owns rather than rules about what Cypher means.
 
   Both destructive commands (`graph database delete`, `graph collection delete`) confirm unless `--yes` is given. `graph database delete` distinguishes a full drop from the case where only the graph collections went because the database was created through the standard database API — reporting that as a full drop would say something is gone that is still there.
 

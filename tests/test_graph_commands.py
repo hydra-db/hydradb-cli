@@ -76,42 +76,10 @@ def _text(result) -> str:
     return re.sub(r"\s+", " ", _ANSI_RE.sub("", result.output))
 
 
-# ── the read-only guard ──────────────────────────────────────────────────────
+# ── the client does not judge the query ─────────────────────────────────────
 
 
-def test_read_only_refuses_a_write_and_issues_no_request():
-    _auth()
-    w = _wrapper()
-    with _patch(w):
-        result = runner.invoke(app, ["graph", "query", "CREATE (n:Person)", "--read-only"], env=_WIDE)
-
-    assert result.exit_code == 1
-    assert "CREATE" in _text(result)
-    assert "Nothing was executed" in _text(result)
-    w.graph.query.assert_not_called()
-
-
-def test_read_only_allows_a_write_keyword_inside_a_literal():
-    """The live-verified false positive: a pure read containing 'CREATE'."""
-    _auth()
-    w = _wrapper(rows=[{"name": "Alice"}])
-    with _patch(w):
-        result = runner.invoke(
-            app,
-            [
-                "graph",
-                "query",
-                'MATCH (p:Person) WHERE p.name = "CREATE something" RETURN p.name AS name',
-                "--read-only",
-            ],
-            env=_WIDE,
-        )
-
-    assert result.exit_code == 0
-    w.graph.query.assert_called_once()
-
-
-def test_without_read_only_a_write_is_sent():
+def test_a_write_is_sent_like_any_other_query():
     _auth()
     w = _wrapper(rows=[])
     with _patch(w):
@@ -121,29 +89,29 @@ def test_without_read_only_a_write_is_sent():
     w.graph.query.assert_called_once()
 
 
-# ── constructs the server rejects before executing ───────────────────────────
+def test_a_rejected_construct_is_sent_to_the_server_verbatim():
+    """The server rejects these before executing anything, and says why.
 
-
-def test_procedure_call_is_refused_locally():
+    Verified live: a query mixing CREATE with a procedure call left the node
+    count unchanged. Pre-judging it here would only duplicate that ruling, and
+    could refuse a query HydraDB would have run.
+    """
     _auth()
-    w = _wrapper()
+    w = _wrapper(rows=[])
     with _patch(w):
         result = runner.invoke(app, ["graph", "query", "CALL db.labels()"], env=_WIDE)
 
-    assert result.exit_code == 1
-    assert "procedure calls" in _text(result)
-    w.graph.query.assert_not_called()
+    assert result.exit_code == 0
+    assert w.graph.query.call_args.kwargs["query"] == "CALL db.labels()"
 
 
-def test_load_csv_is_refused_locally():
-    _auth()
-    w = _wrapper()
-    with _patch(w):
-        result = runner.invoke(app, ["graph", "query", "LOAD CSV FROM 'f.csv' AS r CREATE (n)"], env=_WIDE)
+def test_there_is_no_read_only_flag():
+    """Read-only would require classifying Cypher client-side — a heuristic.
 
-    assert result.exit_code == 1
-    assert "LOAD CSV" in _text(result)
-    w.graph.query.assert_not_called()
+    Offering it invites trust in a guarantee it cannot make.
+    """
+    result = runner.invoke(app, ["graph", "query", "--help"], env=_WIDE)
+    assert "--read-only" not in _text(result)
 
 
 def test_invalid_collection_name_is_rejected_before_the_network():
@@ -244,25 +212,23 @@ def test_nodes_render_readably_in_human_output():
     assert "(:Person {name: Alice})" in _text(result)
 
 
-def test_a_write_with_no_rows_reads_as_success_not_as_empty():
-    """Calling this "no results" invites re-running a write that committed."""
+def test_an_empty_result_names_both_readings_rather_than_guessing():
+    """Zero rows is a read that matched nothing OR a write with no RETURN.
+
+    Telling them apart would mean lexing the Cypher, which this client no
+    longer does. Naming both is enough to stop a user re-running a committed
+    write because the result looked empty.
+    """
     _auth()
     w = _wrapper(rows=[])
     with _patch(w):
         result = runner.invoke(app, ["graph", "query", "MATCH (n:Person) SET n.seen = true"], env=_WIDE)
 
     assert result.exit_code == 0
-    assert "Write completed" in _text(result)
-
-
-def test_a_read_with_no_rows_says_no_rows_matched():
-    _auth()
-    w = _wrapper(rows=[])
-    with _patch(w):
-        result = runner.invoke(app, ["graph", "query", "MATCH (n:Person) RETURN n"], env=_WIDE)
-
-    assert result.exit_code == 0
-    assert "No rows matched" in _text(result)
+    text = _text(result)
+    assert "0 rows" in text
+    assert "nothing matched" in text
+    assert "has been applied" in text
 
 
 # ── collections and lifecycle ────────────────────────────────────────────────

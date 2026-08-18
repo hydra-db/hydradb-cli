@@ -22,10 +22,7 @@ from hydradb_cli.cypher import (
     CYPHER_IDENTIFIER,
     MAX_BODY_BYTES,
     body_size,
-    is_write_query,
     rows_to_table,
-    unsupported_construct,
-    write_clauses_in,
 )
 from hydradb_cli.hydra import HydraDBClientError
 from hydradb_cli.output import (
@@ -116,24 +113,7 @@ def _parse_params(param: list[str] | None, params_json: str | None) -> dict[str,
     return params
 
 
-def _guard_query(query: str, *, read_only: bool, require_write: bool = False) -> None:
-    """Refuse, before the network, anything the server or the caller ruled out."""
-    clauses = write_clauses_in(query)
-
-    if read_only and clauses:
-        print_error(
-            f"--read-only was given and this query contains {', '.join(clauses)}. "
-            "Nothing was executed. Drop --read-only to run it."
-        )
-    if require_write and not clauses:
-        print_error("This query has no write clause. Nothing was executed.")
-
-    unsupported = unsupported_construct(query)
-    if unsupported:
-        print_error(f"{unsupported} Nothing was executed.")
-
-
-def _print_rows(rows: list[dict], *, database: str, collection: str, is_write: bool) -> None:
+def _print_rows(rows: list[dict], *, database: str, collection: str) -> None:
     if get_output_format() == "json":
         # The rows verbatim — a jq contract from day one. Deliberately not
         # wrapped in a status envelope: `hydradb graph query ... | jq '.[0].name'`
@@ -142,15 +122,14 @@ def _print_rows(rows: list[dict], *, database: str, collection: str, is_write: b
         return
 
     if not rows:
-        if is_write:
-            # A write with no RETURN legitimately yields zero rows. Calling that
-            # "no results" invites the user to re-run a write that committed.
-            print_success(
-                f"Write completed against {database}/{collection}. "
-                "The query returned no rows, which is expected when it has no RETURN clause."
-            )
-        else:
-            console.print(f"  [dim]No rows matched in {database}/{collection}.[/dim]")
+        # Zero rows means one of two things and this does not guess which: a
+        # read that matched nothing, or a write with no RETURN clause. Naming
+        # both keeps a user from re-running a write that already committed
+        # because the result "looked empty".
+        console.print(
+            f"  [dim]0 rows from {database}/{collection}. For a read that means nothing "
+            "matched; for a write with no RETURN clause the write has been applied.[/dim]"
+        )
         return
 
     headers, cells = rows_to_table(rows)
@@ -165,9 +144,6 @@ def query(
         None, "--param", "-p", help="Query parameter as key=value. Repeatable. Values parse as JSON when they can."
     ),
     params_json: str | None = typer.Option(None, "--params-json", help="Query parameters as a JSON object."),
-    read_only: bool = typer.Option(
-        False, "--read-only", help="Refuse the query if it contains a write clause, before sending it."
-    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Graph database. Uses the default if unset."),
     collection: str | None = typer.Option(None, "--collection", "-c", help="Graph collection."),
 ) -> None:
@@ -176,12 +152,12 @@ def query(
     Pass user data through --param rather than building it into the query
     string: parameters are bound safely and keep query plans cacheable.
 
-    HydraDB runs your Cypher verbatim. Two constructs are rejected before
-    execution: procedure calls (CALL db.*, CALL apoc.*) and LOAD CSV. Note that
-    EXPLAIN and PROFILE EXECUTE the query rather than planning it.
+    Your query is sent verbatim. HydraDB rejects procedure calls (CALL db.*,
+    CALL apoc.*) and LOAD CSV before executing anything, so a rejected query
+    changes nothing and the server explains why. Note that EXPLAIN and PROFILE
+    EXECUTE the query rather than planning it.
     """
     _validate_collection(collection)
-    _guard_query(cypher, read_only=read_only)
 
     params = _parse_params(param, params_json)
     wrapper = get_wrapper()
@@ -213,7 +189,6 @@ def query(
         rows,
         database=database or wrapper.default_database or "",
         collection=collection or wrapper.default_graph_collection,
-        is_write=is_write_query(cypher),
     )
 
 
