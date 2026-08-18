@@ -1,6 +1,6 @@
 """Graph (BYOG) commands — full Cypher over graph collections you own.
 
-``hydradb graph query|schema|collections|load``, plus ``graph database`` and
+``hydradb graph query|collections|load``, plus ``graph database`` and
 ``graph collection`` for lifecycle management.
 
 This is HydraDB's **graph database** offering, distinct from the memory and
@@ -20,8 +20,6 @@ import typer
 from hydradb_cli.cypher import (
     COLLECTION_PATTERN,
     MAX_BODY_BYTES,
-    SCHEMA_QUERIES,
-    SCHEMA_SAMPLE,
     body_size,
     is_write_query,
     rows_to_table,
@@ -206,128 +204,6 @@ def query(
         collection=collection or wrapper.default_graph_collection,
         is_write=is_write_query(cypher),
     )
-
-
-@app.command(name="schema")
-def schema(
-    sample: int = typer.Option(SCHEMA_SAMPLE, "--sample", help="Nodes/relationships to sample for property keys."),
-    database: str | None = typer.Option(None, "--database", "-d", help="Graph database. Uses the default if unset."),
-    collection: str | None = typer.Option(None, "--collection", "-c", help="Graph collection."),
-) -> None:
-    """Show what a graph collection actually contains.
-
-    Node labels and counts, relationship types and counts, the property keys
-    seen on each, and which labels each relationship connects.
-
-    HydraDB exposes no schema procedure — CALL db.schema.visualization() and
-    CALL apoc.meta.schema() are both rejected — so this is derived from plain
-    aggregate queries over a sample. Counts are exact; property keys and
-    connections are representative.
-    """
-    _validate_collection(collection)
-    wrapper = get_wrapper()
-
-    def run(query_text: str) -> list[dict]:
-        params = {"sample": sample} if "$sample" in query_text else None
-        return wrapper.graph.query(query=query_text, params=params, database=database, collection=collection)
-
-    results = _execute(
-        "Deriving schema...",
-        lambda: {name: run(text) for name, text in SCHEMA_QUERIES.items()},
-    )
-
-    labels = results["labels"]
-    rel_types = results["relationship_types"]
-    node_props = results["node_properties"]
-    rel_props = results["relationship_properties"]
-    shape = results["shape"]
-
-    db_name = database or wrapper.default_database or ""
-    col_name = collection or wrapper.default_graph_collection
-
-    if get_output_format() == "json":
-        print_json(
-            {
-                "database": db_name,
-                "collection": col_name,
-                "labels": labels,
-                "relationship_types": rel_types,
-                "node_properties": node_props,
-                "relationship_properties": rel_props,
-                "connections": shape,
-                "sampled": sample,
-            }
-        )
-        return
-
-    if not labels and not rel_types:
-        console.print(
-            f"  [dim]The graph collection {db_name}/{col_name} is empty — no nodes and no "
-            "relationships. Reading a collection that was never written to is not an error.[/dim]"
-        )
-        return
-
-    def keys_by(rows: list[dict], owner_key: str) -> dict[str, list[str]]:
-        grouped: dict[str, list[str]] = {}
-        for row in rows:
-            owner = str(row.get(owner_key) or "")
-            key = str(row.get("key") or "")
-            if owner and key:
-                grouped.setdefault(owner, []).append(key)
-        return grouped
-
-    node_keys = keys_by(node_props, "label")
-    rel_keys = keys_by(rel_props, "type")
-
-    console.print(
-        make_table(
-            "Label",
-            "Count",
-            "Properties",
-            rows=[
-                [
-                    f"(:{row.get('label')})",
-                    str(row.get("count", "?")),
-                    ", ".join(node_keys.get(str(row.get("label")), [])) or "—",
-                ]
-                for row in labels
-            ],
-            title="Node labels",
-        )
-    )
-
-    if rel_types:
-        console.print(
-            make_table(
-                "Type",
-                "Count",
-                "Properties",
-                rows=[
-                    [
-                        f"[:{row.get('type')}]",
-                        str(row.get("count", "?")),
-                        ", ".join(rel_keys.get(str(row.get("type")), [])) or "—",
-                    ]
-                    for row in rel_types
-                ],
-                title="Relationship types",
-            )
-        )
-
-    if shape:
-        console.print(
-            make_table(
-                "Connection",
-                rows=[
-                    [f"(:{':'.join(row.get('start') or [])})-[:{row.get('rel')}]->(:{':'.join(row.get('end') or [])})"]
-                    for row in shape
-                ],
-                title="Connections",
-            )
-        )
-
-    # Say so, rather than letting a sampled answer read as exhaustive.
-    console.print(f"  [dim]Property keys and connections derived from a sample of {sample}. Counts are exact.[/dim]")
 
 
 @app.command(name="collections")

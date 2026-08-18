@@ -3,8 +3,6 @@
 Three things that need no network, so they can be tested directly:
 
   * deciding whether a query WRITES, so ``--read-only`` can refuse one;
-  * the plain-Cypher queries that stand in for the schema procedures HydraDB
-    does not expose;
   * turning the server's row objects back into something readable.
 
 Kept deliberately in step with the same logic in the MCP client
@@ -163,8 +161,7 @@ def unsupported_construct(query: str) -> str | None:
     if call and call.group(1) is None:
         return (
             "HydraDB rejects procedure calls (CALL db.*, CALL apoc.*) before running them. "
-            "CALL { ... } subqueries are supported. For schema information run "
-            "'hydradb graph schema', which derives it from plain Cypher."
+            "CALL { ... } subqueries are supported."
         )
 
     if re.search(r"\bLOAD\s+CSV\b", code, re.IGNORECASE):
@@ -186,35 +183,6 @@ def body_size(payload: dict[str, Any]) -> int:
     """
     return len(json.dumps(payload, default=str).encode("utf-8"))
 
-
-# The plain-Cypher stand-ins for the schema procedures BYOG does not expose.
-#
-# Neo4j's ``get_neo4j_schema`` runs ``CALL apoc.meta.schema()``. HydraDB rejects
-# every procedure call, so the schema is assembled from five aggregates
-# instead. Each is a pure read, each sampled one is bounded, and all were
-# verified against a live BYOG collection.
-#
-# The sample bound matters: on a large graph an unbounded ``MATCH (n)`` scan is
-# the shape that hits the 8s read budget and comes back as a 400 asking for a
-# LIMIT.
-SCHEMA_QUERIES: dict[str, str] = {
-    "labels": "MATCH (n) UNWIND labels(n) AS label RETURN label, count(*) AS count ORDER BY label",
-    "relationship_types": "MATCH ()-[r]->() RETURN type(r) AS type, count(*) AS count ORDER BY type",
-    "node_properties": (
-        "MATCH (n) WITH n LIMIT $sample UNWIND labels(n) AS label UNWIND keys(n) AS key "
-        "RETURN label, key, count(*) AS count ORDER BY label, key"
-    ),
-    "relationship_properties": (
-        "MATCH ()-[r]->() WITH r LIMIT $sample UNWIND keys(r) AS key "
-        "RETURN type(r) AS type, key, count(*) AS count ORDER BY type, key"
-    ),
-    "shape": (
-        "MATCH (a)-[r]->(b) WITH a, r, b LIMIT $sample "
-        "RETURN DISTINCT labels(a) AS start, type(r) AS rel, labels(b) AS end ORDER BY rel"
-    ),
-}
-
-SCHEMA_SAMPLE = 1000
 
 # Keys HydraDB's renderer adds to a returned node or relationship, as opposed to
 # properties the user stored.

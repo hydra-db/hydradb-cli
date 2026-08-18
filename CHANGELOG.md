@@ -4,13 +4,13 @@
 
 ### Added
 
-- **`hydradb graph` — full Cypher over graph collections you own (BYOG).** HydraDB's graph database offering had no CLI surface at all: `query`, `ingest` and the rest address the memory and knowledge corpora, and the property graphs users model and own end to end were reachable only through the raw API. This adds `graph query`, `graph schema`, `graph collections`, `graph load`, `graph database create/delete` and `graph collection delete`. Everything existing is untouched — the two stores are separate, and nothing crosses between them.
+- **`hydradb graph` — full Cypher over graph collections you own (BYOG).** HydraDB's graph database offering had no CLI surface at all: `query`, `ingest` and the rest address the memory and knowledge corpora, and the property graphs users model and own end to end were reachable only through the raw API. This adds `graph query`, `graph collections`, `graph load`, `graph database create/delete` and `graph collection delete`. Everything existing is untouched — the two stores are separate, and nothing crosses between them.
 
   `graph query` takes parameters through `--param k=v` (values parse as JSON when they can, so `--param n=3` is the number 3) or `--params-json`. `--output json` prints the rows verbatim, so `hydradb graph query ... | jq '.[].name'` works without unwrapping an envelope.
 
   `--read-only` refuses a query containing a write clause *before* sending it. The check strips string literals, comments and backticked identifiers first, so `WHERE p.name = "CREATE something"` is correctly treated as a read — a naive keyword scan (which is what Neo4j's own MCP does) refuses that query, and HydraDB accepts it.
 
-  `graph schema` derives the schema from five plain aggregate queries rather than calling a procedure, because HydraDB rejects `CALL db.*` and `CALL apoc.*` outright. Counts are exact; property keys and connections come from a sample, and the output says so rather than letting a partial answer read as exhaustive.
+  There is deliberately **no** `graph schema` command. HydraDB rejects `CALL db.*` and `CALL apoc.*` outright, and a derived schema is not part of the product — callers discover a collection's structure by querying it (`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l`), which the help text and README both show.
 
   `graph load` chunks a JSON file into batches that fit inside the 256 KiB request cap and the 30s write budget, and `MERGE`s on a key you supply so a load that fails part-way is safe to re-run — a bare `CREATE` would duplicate every row of an already-applied chunk. Rows missing the merge key, an unsafe `--label`, and batches that would exceed the cap are all rejected before anything is sent, so a load never half-applies.
 

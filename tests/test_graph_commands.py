@@ -132,8 +132,6 @@ def test_procedure_call_is_refused_locally():
 
     assert result.exit_code == 1
     assert "procedure calls" in _text(result)
-    # The alternative is named, not just the refusal.
-    assert "graph schema" in _text(result)
     w.graph.query.assert_not_called()
 
 
@@ -265,49 +263,6 @@ def test_a_read_with_no_rows_says_no_rows_matched():
 
     assert result.exit_code == 0
     assert "No rows matched" in _text(result)
-
-
-# ── schema ───────────────────────────────────────────────────────────────────
-
-
-def _schema_rows(query, params=None, database=None, collection=None):
-    if "UNWIND labels(n) AS label RETURN label" in query:
-        return [{"label": "Person", "count": 2}]
-    if "RETURN type(r) AS type, count(*)" in query:
-        return [{"type": "KNOWS", "count": 1}]
-    if "UNWIND keys(n) AS key" in query:
-        return [{"label": "Person", "key": "name", "count": 2}]
-    if "UNWIND keys(r) AS key" in query:
-        return [{"type": "KNOWS", "key": "since", "count": 1}]
-    return [{"start": ["Person"], "rel": "KNOWS", "end": ["Person"]}]
-
-
-def test_schema_is_derived_with_no_procedure_call():
-    _auth()
-    w = _wrapper()
-    w.graph.query.side_effect = lambda **kw: _schema_rows(kw["query"])
-    with _patch(w):
-        result = runner.invoke(app, ["graph", "schema"], env=_WIDE)
-
-    text = _text(result)
-    assert "(:Person)" in text
-    assert "[:KNOWS]" in text
-    # A sampled answer must not read as exhaustive.
-    assert "sample" in text
-
-    for call in w.graph.query.call_args_list:
-        assert not re.search(r"\bCALL\s+[a-z]", call.kwargs["query"], re.IGNORECASE)
-
-
-def test_empty_collection_is_reported_as_empty_not_as_failure():
-    _auth()
-    w = _wrapper(rows=[])
-    with _patch(w):
-        result = runner.invoke(app, ["graph", "schema"], env=_WIDE)
-
-    assert result.exit_code == 0
-    assert "empty" in _text(result)
-    assert "not an error" in _text(result)
 
 
 # ── collections and lifecycle ────────────────────────────────────────────────

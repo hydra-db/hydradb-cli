@@ -332,7 +332,6 @@ This is a **separate store** from memories and knowledge, and nothing crosses be
 | Command | What it does | Key options |
 |---------|--------------|-------------|
 | `graph query <cypher>` | Runs Cypher against one collection | `--param k=v`, `--params-json`, `--read-only`, `--database`, `--collection` |
-| `graph schema` | Labels, relationship types, properties, connections | `--sample`, `--database`, `--collection` |
 | `graph collections` | Lists the graphs in a graph database | `--database` |
 | `graph load <file.json>` | Chunked, re-runnable bulk import | `--label`, `--key`, `--chunk` |
 | `graph database create <name>` | Creates a graph database (ready immediately) | — |
@@ -350,8 +349,8 @@ hydradb graph query "MATCH (p:Person {name: \$n})-[:KNOWS*1..3]->(f) RETURN DIST
 # Refuse to run anything that writes, before it is sent
 hydradb graph query "MATCH (n) RETURN n" --read-only
 
-# What is actually in here?
-hydradb graph schema
+# What is actually in here? There is no schema command — ask the graph itself.
+hydradb graph query "MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l"
 
 # Bulk import: chunked to fit the request cap, MERGEd so a re-run is safe
 hydradb graph load people.json --label Person --key ext_id
@@ -369,7 +368,7 @@ ignores string literals, comments and backticked identifiers, so
 **Differences from Neo4j.** Each of these is rejected *before* execution, so a rejected
 query changes nothing and fails identically on retry:
 
-- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected — `CALL { ... }` subqueries are fine. Use `graph schema`, which derives the schema from plain Cypher rather than APOC.
+- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected — `CALL { ... }` subqueries are fine. There is no schema command and no `apoc.meta.schema()`; discover a collection's structure by querying it, as above.
 - `LOAD CSV` is rejected — pass rows through parameters, or use `graph load`.
 - Existence checks are bare pattern predicates (`WHERE (p)-[:KNOWS]->()`); `EXISTS { ... }` and `exists()` are not accepted.
 - `shortestPath` belongs in `RETURN`/`WITH`, not `MATCH p = ...`, and must be directed.

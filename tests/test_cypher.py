@@ -10,7 +10,6 @@ import pytest
 from hydradb_cli.cypher import (
     COLLECTION_PATTERN,
     MAX_BODY_BYTES,
-    SCHEMA_QUERIES,
     body_size,
     is_write_query,
     render_value,
@@ -133,24 +132,6 @@ def test_load_csv_is_named_with_the_alternative():
 
 def test_procedure_name_inside_a_literal_is_not_a_procedure_call():
     assert unsupported_construct('MATCH (n) WHERE n.doc = "CALL db.labels()" RETURN n') is None
-
-
-# ── schema queries ───────────────────────────────────────────────────────────
-
-
-def test_no_schema_query_uses_a_rejected_construct():
-    """HydraDB rejects every procedure call, which is why the schema is derived.
-
-    A schema query that used one would fail before it ran.
-    """
-    for name, query in SCHEMA_QUERIES.items():
-        assert unsupported_construct(query) is None, name
-        assert is_write_query(query) is False, name
-
-
-def test_sampled_schema_queries_bind_their_limit():
-    for name in ("node_properties", "relationship_properties", "shape"):
-        assert "$sample" in SCHEMA_QUERIES[name], name
 
 
 # ── names and sizes ──────────────────────────────────────────────────────────
