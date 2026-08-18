@@ -4,7 +4,7 @@ import sys
 
 import httpx
 
-from hydradb_cli.config import get_api_key, get_base_url, get_collection, get_database
+from hydradb_cli.config import get_api_key, get_base_url, get_collection, get_database, get_graph_collection
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
 from hydradb_cli.output import print_error, warn_deprecated
 
@@ -84,6 +84,7 @@ def get_wrapper() -> HydraDB:
         base_url=get_base_url(),
         database=get_database(),
         collection=get_collection(),
+        graph_collection=get_graph_collection(),
     )
 
 

@@ -20,6 +20,12 @@ ENV_API_KEY = "HYDRADB_API_KEY"
 ENV_DATABASE = "HYDRADB_DATABASE"
 ENV_COLLECTION = "HYDRADB_COLLECTION"
 ENV_BASE_URL = "HYDRADB_BASE_URL"
+# Graph (BYOG) scope. A graph collection is a different namespace from a
+# context collection, so it is configured separately and never falls back to
+# HYDRADB_COLLECTION — Cypher aimed at the wrong one reads an empty graph
+# rather than failing, which is the hardest kind of mistake to notice.
+ENV_GRAPH_COLLECTION = "HYDRADB_GRAPH_COLLECTION"
+DEFAULT_GRAPH_COLLECTION = "default"
 
 # Back-compat aliases for the historical constant names used elsewhere/in tests.
 ENV_TENANT_ID = ENV_DATABASE
@@ -108,6 +114,18 @@ def get_collection() -> str | None:
     """Get default collection (canonical name for the sub-tenant scope)."""
     file_cfg = _read_config_file()
     return _env(ENV_COLLECTION) or file_cfg.get("collection") or file_cfg.get("sub_tenant_id")
+
+
+def get_graph_collection() -> str:
+    """Default graph (BYOG) collection.
+
+    Falls back to the literal "default" rather than to ``get_collection()``:
+    the context collection names a memory/knowledge partition and means
+    nothing to a graph, so inheriting it would silently point Cypher at a
+    collection the user never chose.
+    """
+    file_cfg = _read_config_file()
+    return _env(ENV_GRAPH_COLLECTION) or file_cfg.get("graph_collection") or DEFAULT_GRAPH_COLLECTION
 
 
 # Historical names kept as thin aliases so existing call sites keep working.
