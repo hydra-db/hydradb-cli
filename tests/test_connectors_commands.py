@@ -430,3 +430,69 @@ def test_json_output_for_list_is_the_array():
         result = runner.invoke(app, ["--output", "json", "connectors", "list"], env=_WIDE)
 
     assert json.loads(result.output) == [{"connector_id": "c1", "provider": "slack"}]
+
+
+# ── rendering and message defects ────────────────────────────────────────────
+
+
+def test_relative_handles_a_timestamp_with_no_offset():
+    """A naive timestamp used to raise TypeError out of the render helper.
+
+    Subtracting naive from aware throws, so `connectors list` and `connectors
+    status` died with a stack trace instead of showing a row. The live API
+    returns RFC3339 with `Z`, so this guards a shape we do not control.
+    """
+    from hydradb_cli.commands.connectors import _relative
+
+    assert _relative("2026-08-18T11:00:00") not in ("", None)
+    assert _relative("2026-08-18T11:00:00").endswith(("ago", "s", "m", "h", "d"))
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    ["2026-08-18T11:00:00Z", "2026-08-18T11:00:00+00:00", "2026-08-18T11:00:00", None, "not-a-date"],
+)
+def test_relative_never_raises(timestamp):
+    from hydradb_cli.commands.connectors import _relative
+
+    assert isinstance(_relative(timestamp), str)
+
+
+def test_list_renders_a_connector_with_a_naive_timestamp():
+    """End to end: the command must not crash on the shape above."""
+    _auth()
+    w = _wrapper(
+        list=[
+            {
+                "connector_id": "c1",
+                "name": "prod",
+                "provider": "slack",
+                "database": "db",
+                "sync_status": "idle",
+                "last_successful_sync_at": "2026-08-18T11:00:00",
+            }
+        ]
+    )
+    with _patch(w):
+        result = runner.invoke(app, ["connectors", "list"], env=_WIDE)
+
+    assert result.exit_code == 0, result.output
+    assert "prod" in _text(result)
+
+
+def test_no_credential_schema_error_does_not_name_a_flag_that_exists_nowhere():
+    """The message used to tell users to "run without --no-input".
+
+    No such flag has ever existed, so the advice was unfollowable.
+    """
+    _auth()
+    w = _wrapper(provider={"provider": "x", "credential_schema": {}})
+    with _patch(w):
+        result = runner.invoke(app, ["connectors", "create", "--provider", "x"], env=_WIDE)
+
+    assert result.exit_code == 1
+    text = _text(result)
+    assert "--no-input" not in text
+    # It should say WHY it cannot prompt, and give a route that works.
+    assert "did not declare a credential schema" in text
+    assert "--credentials-stdin" in text

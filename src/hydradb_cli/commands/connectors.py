@@ -164,9 +164,13 @@ def _read_credentials(from_stdin: bool, provider_schema: dict | None = None) -> 
     # user is not left guessing what it wants.
     fields = _required_credential_fields(provider_schema)
     if not fields:
+        # No schema means there is nothing to prompt FOR — say that, rather
+        # than pointing at a way to enable prompting. (This previously told the
+        # user to "run without --no-input", a flag that has never existed.)
         print_error(
-            "No credentials supplied. Pipe them with --credentials-stdin, set "
-            f"{ENV_CREDENTIALS}, or run without --no-input to be prompted."
+            "No credentials supplied, and this provider did not declare a credential "
+            "schema, so there are no fields to prompt for. Pipe them with "
+            f"--credentials-stdin or set {ENV_CREDENTIALS}."
         )
     if not sys.stdin.isatty():
         print_error(
@@ -216,6 +220,15 @@ def _relative(timestamp: str | None) -> str:
         parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
     except ValueError:
         return str(timestamp)
+
+    # A timestamp with no offset is assumed UTC. Subtracting a naive datetime
+    # from an aware one raises TypeError, which surfaced as an unhandled stack
+    # trace out of `connectors list` and `connectors status` — a rendering
+    # helper taking down the whole command. The API returns RFC3339 with `Z`
+    # today (checked across every connector), so this is defence against a
+    # shape we do not control rather than a bug anyone has hit.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
 
     delta = (datetime.now(timezone.utc) - parsed).total_seconds()
     future = delta < 0
