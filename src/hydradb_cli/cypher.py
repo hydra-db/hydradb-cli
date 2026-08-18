@@ -44,6 +44,19 @@ MAX_BODY_BYTES = 256 * 1024
 # Collection names the server accepts.
 COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
+# A bare Cypher identifier — a label or a property name that can be written
+# unquoted in a query.
+#
+# Deliberately NOT ``COLLECTION_PATTERN``: that one allows hyphens, which are
+# legal in a collection name and illegal in an identifier. Reusing it let
+# ``--label my-label`` through, and the server then rejected the generated
+# query with "Invalid input '-': expected a label" — a confusing failure
+# blamed on the file rather than on the flag.
+#
+# Cypher can quote an identifier with backticks, but a caller who needs that is
+# better served writing their own MERGE than having one built for them.
+CYPHER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def strip_non_code(query: str) -> str:
     """Blank out everything that is not executable Cypher.

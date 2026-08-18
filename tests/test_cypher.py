@@ -9,6 +9,7 @@ import pytest
 
 from hydradb_cli.cypher import (
     COLLECTION_PATTERN,
+    CYPHER_IDENTIFIER,
     MAX_BODY_BYTES,
     body_size,
     is_write_query,
@@ -194,3 +195,26 @@ def test_rows_to_table_covers_every_column():
     assert headers == ["a", "b"]
     # The absent cell is marked rather than omitted, keeping columns aligned.
     assert cells == [["1", "—"], ["—", "2"]]
+
+
+# ── Cypher identifiers ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["Person", "_x", "ext_id", "a1", "A_1b2"])
+def test_valid_cypher_identifiers(name):
+    assert CYPHER_IDENTIFIER.match(name)
+
+
+@pytest.mark.parametrize("name", ["", "my-label", "ext-id", "1st", "has space", "a.b", "n)"])
+def test_invalid_cypher_identifiers(name):
+    assert CYPHER_IDENTIFIER.match(name) is None
+
+
+def test_identifiers_are_stricter_than_collection_names():
+    """A hyphen is legal in a collection name and illegal in an identifier.
+
+    Conflating the two is what let `--label my-label` reach the server and fail
+    there. These patterns must not be interchangeable.
+    """
+    assert COLLECTION_PATTERN.match("my-label")
+    assert CYPHER_IDENTIFIER.match("my-label") is None

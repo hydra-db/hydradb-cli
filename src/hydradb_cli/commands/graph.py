@@ -19,6 +19,7 @@ import typer
 
 from hydradb_cli.cypher import (
     COLLECTION_PATTERN,
+    CYPHER_IDENTIFIER,
     MAX_BODY_BYTES,
     body_size,
     is_write_query,
@@ -185,7 +186,17 @@ def query(
     params = _parse_params(param, params_json)
     wrapper = get_wrapper()
 
-    payload = {"query": cypher, "params": params}
+    # Measure the body the transport actually sends: `database` and
+    # `collection` ride along with the query, so leaving them out lets a payload
+    # sitting just under the cap pass locally and be rejected remotely with a
+    # 413 — after the whole thing has been uploaded, which is the outcome this
+    # check exists to avoid.
+    payload = {
+        "database": database or wrapper.default_database or "",
+        "collection": collection or wrapper.default_graph_collection,
+        "query": cypher,
+        "params": params,
+    }
     if body_size(payload) > MAX_BODY_BYTES:
         print_error(
             f"This request is {body_size(payload) // 1024} KiB, over HydraDB's "
@@ -237,7 +248,7 @@ def load(
     file: Path = typer.Argument(help="JSON file: an array of row objects."),
     label: str = typer.Option(..., "--label", "-l", help="Node label to MERGE, e.g. Person."),
     key: str = typer.Option(..., "--key", "-k", help="Property to MERGE on. Must be unique per row."),
-    chunk: int = typer.Option(500, "--chunk", help="Rows per request."),
+    chunk: int = typer.Option(500, "--chunk", min=1, help="Rows per request."),
     database: str | None = typer.Option(None, "--database", "-d", help="Graph database. Uses the default if unset."),
     collection: str | None = typer.Option(None, "--collection", "-c", help="Graph collection."),
 ) -> None:
@@ -269,18 +280,40 @@ def load(
             f"Missing at row index: {shown}{' ...' if len(missing) > 5 else ''}. Nothing was loaded."
         )
 
-    if not COLLECTION_PATTERN.match(label):
-        # The label is interpolated into the query text (Cypher cannot bind a
-        # label as a parameter), so it is constrained to a safe charset rather
-        # than trusted. Same rule as a collection name, which is strict enough.
-        print_error(f"Invalid label '{label}'. Use letters, digits, underscores and hyphens only.")
+    # Both the label and the merge key are interpolated into the query text —
+    # Cypher can bind neither as a parameter — so both must be bare identifiers.
+    # This is deliberately NOT COLLECTION_PATTERN: that allows hyphens, which
+    # are legal in a collection name and illegal in an identifier, so
+    # `--label my-label` passed validation and then failed server-side with
+    # "Invalid input '-': expected a label" — a confusing error that reads as a
+    # problem with the file rather than with the flag.
+    if not CYPHER_IDENTIFIER.match(label):
+        print_error(
+            f"Invalid label '{label}'. A Cypher label must be letters, digits and underscores "
+            "only, starting with a letter or underscore."
+        )
+    if not CYPHER_IDENTIFIER.match(key):
+        print_error(
+            f"Invalid merge key '{key}'. A Cypher property name must be letters, digits and "
+            "underscores only, starting with a letter or underscore."
+        )
 
     wrapper = get_wrapper()
     cypher = f"UNWIND $rows AS row MERGE (n:{label} {{{key}: row.{key}}}) SET n += row"
 
     batches = [rows[i : i + chunk] for i in range(0, len(rows), chunk)]
     oversized = [
-        i for i, batch in enumerate(batches) if body_size({"query": cypher, "params": {"rows": batch}}) > MAX_BODY_BYTES
+        i
+        for i, batch in enumerate(batches)
+        if body_size(
+            {
+                "database": database or wrapper.default_database or "",
+                "collection": collection or wrapper.default_graph_collection,
+                "query": cypher,
+                "params": {"rows": batch},
+            }
+        )
+        > MAX_BODY_BYTES
     ]
     if oversized:
         print_error(

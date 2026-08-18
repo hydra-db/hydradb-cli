@@ -380,6 +380,68 @@ def test_load_rejects_rows_missing_the_merge_key(tmp_path):
     w.graph.query.assert_not_called()
 
 
+def test_load_rejects_a_hyphenated_label(tmp_path):
+    """A hyphen is legal in a collection name and illegal in a Cypher label.
+
+    Validating the label with the collection pattern let `--label my-label`
+    through, and the server then rejected the generated query with
+    "Invalid input '-': expected a label" — confirmed against the live API.
+    """
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps([{"ext_id": "1"}]))
+
+    w = _wrapper()
+    with _patch(w):
+        result = runner.invoke(app, ["graph", "load", str(path), "--label", "my-label", "--key", "ext_id"], env=_WIDE)
+
+    assert result.exit_code == 1
+    assert "Invalid label" in _text(result)
+    w.graph.query.assert_not_called()
+
+
+def test_load_rejects_a_merge_key_that_is_not_an_identifier(tmp_path):
+    """`--key` is interpolated twice — as a map key and as `row.<key>`.
+
+    Cypher can bind neither, so a key like `ext-id` produces a query the server
+    rejects (verified live) rather than a load.
+    """
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps([{"ext-id": "1"}]))
+
+    w = _wrapper()
+    with _patch(w):
+        result = runner.invoke(app, ["graph", "load", str(path), "--label", "Person", "--key", "ext-id"], env=_WIDE)
+
+    assert result.exit_code == 1
+    assert "Invalid merge key" in _text(result)
+    w.graph.query.assert_not_called()
+
+
+@pytest.mark.parametrize("chunk", ["0", "-1"])
+def test_load_rejects_a_nonpositive_chunk(tmp_path, chunk):
+    """`--chunk 0` raised ValueError; `--chunk -1` built no batches at all.
+
+    The negative case was the worse one: it reported success having loaded
+    nothing.
+    """
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps([{"ext_id": "1"}]))
+
+    w = _wrapper()
+    with _patch(w):
+        result = runner.invoke(
+            app,
+            ["graph", "load", str(path), "--label", "Person", "--key", "ext_id", "--chunk", chunk],
+            env=_WIDE,
+        )
+
+    assert result.exit_code != 0
+    w.graph.query.assert_not_called()
+
+
 def test_load_rejects_an_unsafe_label(tmp_path):
     """The label is interpolated into the query — Cypher cannot bind it."""
     _auth()
