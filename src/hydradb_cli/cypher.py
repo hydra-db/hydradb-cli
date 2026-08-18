@@ -42,7 +42,12 @@ WRITE_CLAUSES = (
 MAX_BODY_BYTES = 256 * 1024
 
 # Collection names the server accepts.
-COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+#
+# Anchored with ``\Z``, not ``$``: in Python ``$`` also matches immediately
+# BEFORE a trailing newline, so ``"contacts\n"`` — which a scripted caller
+# gets from `--collection "$(cat name.txt)"` or a here-doc — would pass
+# validation and be sent verbatim. ``\Z`` is the true end of string.
+COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
 # A bare Cypher identifier — a label or a property name that can be written
 # unquoted in a query.
@@ -55,7 +60,7 @@ COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 #
 # Cypher can quote an identifier with backticks, but a caller who needs that is
 # better served writing their own MERGE than having one built for them.
-CYPHER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CYPHER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def strip_non_code(query: str) -> str:

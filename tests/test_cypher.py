@@ -143,7 +143,7 @@ def test_valid_collection_names(name):
     assert COLLECTION_PATTERN.match(name)
 
 
-@pytest.mark.parametrize("name", ["", "-leading", "_leading", "has space", "has/slash", "a" * 65])
+@pytest.mark.parametrize("name", ["", "-leading", "_leading", "has space", "has/slash", "a" * 65, "contacts\n"])
 def test_invalid_collection_names(name):
     assert COLLECTION_PATTERN.match(name) is None
 
@@ -205,9 +205,21 @@ def test_valid_cypher_identifiers(name):
     assert CYPHER_IDENTIFIER.match(name)
 
 
-@pytest.mark.parametrize("name", ["", "my-label", "ext-id", "1st", "has space", "a.b", "n)"])
+@pytest.mark.parametrize("name", ["", "my-label", "ext-id", "1st", "has space", "a.b", "n)", "Person\n"])
 def test_invalid_cypher_identifiers(name):
     assert CYPHER_IDENTIFIER.match(name) is None
+
+
+@pytest.mark.parametrize("pattern", [COLLECTION_PATTERN, CYPHER_IDENTIFIER])
+def test_patterns_reject_a_trailing_newline(pattern):
+    """Python's ``$`` also matches immediately before a trailing newline.
+
+    A scripted caller writing `--label "$(cat name.txt)"` gets exactly that, and
+    with ``$`` the value passed validation and was interpolated verbatim into
+    the query. Both patterns are anchored with ``\\Z``.
+    """
+    assert pattern.match("Person") is not None
+    assert pattern.match("Person\n") is None
 
 
 def test_identifiers_are_stricter_than_collection_names():
