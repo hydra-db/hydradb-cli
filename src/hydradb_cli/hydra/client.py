@@ -146,6 +146,49 @@ class _Databases(_Resource):
         resp = self._invoke(self._w._sdk.databases.collections, database=self._w._require_database(database))
         return _unwrap(resp)
 
+    def delete_collection(self, *, database: str | None = None, collection: str) -> dict:
+        """Delete one collection, leaving the parent database intact.
+
+        Hand-rolled for the same reason :class:`_Graph` is: the pinned
+        ``hydradb-sdk==2.1.2`` has no ``databases.delete_collection``. It reuses
+        the wrapper's own ``httpx``, sends the same ``API-Version: 2`` header,
+        unwraps the same envelope and raises the same
+        :class:`HydraDBClientError`, so ``handle_api_error`` treats it exactly
+        like an SDK call. When the SDK grows the method this becomes a one-line
+        ``self._invoke`` and no caller changes.
+        """
+        db = self._w._require_database(database)
+        if not (collection or "").strip():
+            raise HydraDBClientError("collection is required")
+        url = f"{self._w._base_url.rstrip('/')}/databases/collections"
+        headers = {
+            "Authorization": f"Bearer {self._w._token}",
+            "Content-Type": "application/json",
+            "API-Version": "2",
+        }
+        try:
+            response = httpx.request(
+                "DELETE",
+                url,
+                headers=headers,
+                params={"database": db, "collection": collection},
+                timeout=self._w._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise translate_sdk_error(exc) from exc
+
+        try:
+            body = response.json() if response.content else None
+        except ValueError:
+            body = response.text or None
+
+        if response.is_error:
+            # Same message extraction the SDK and BYOG paths use, so a 404 from
+            # the delete tombstone surfaces the API's own wording.
+            raise HydraDBClientError(response.status_code, _stringify_body(body))
+
+        return _unwrap_payload(body) or {}
+
     def stats(self, *, database: str | None = None) -> dict:
         resp = self._invoke(self._w._sdk.databases.stats, database=self._w._require_database(database))
         return _unwrap(resp)

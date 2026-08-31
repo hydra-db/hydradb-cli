@@ -292,6 +292,33 @@ def database_collections(
     _impl.do_database_collections(db or tenant_id_arg)
 
 
+@database_app.command("delete-collection")
+def database_delete_collection(
+    collection_arg: str | None = typer.Argument(None, metavar="COLLECTION", help="Collection to delete."),
+    database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if omitted."),
+    collection: str | None = typer.Option(None, "--collection", "-c", help="Collection to delete."),
+    tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
+    sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
+    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Delete one collection and all its data. The database is left intact.
+
+    This action is irreversible: knowledge, memories, embeddings, graph nodes
+    and stored objects for the collection are permanently removed. Sibling
+    collections in the same database are untouched.
+    """
+    db, coll = resolve_scope_flags(database, collection or collection_arg, tenant_id, sub_tenant_id)
+    target = coll or collection_arg
+    if not (target or "").strip():
+        print_error("Collection is required. Pass it as an argument or with --collection.")
+    if not confirm:
+        typer.confirm(
+            f"Delete collection '{target}' and ALL its data? The database is kept.",
+            abort=True,
+        )
+    _impl.do_database_delete_collection(db, target)
+
+
 @database_app.command("stats")
 def database_stats(
     tenant_id_arg: str | None = typer.Argument(None, metavar="DATABASE", help="Database. Uses default if omitted."),

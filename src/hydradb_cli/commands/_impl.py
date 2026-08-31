@@ -636,6 +636,32 @@ def do_database_list() -> None:
     print_result(result, fmt)
 
 
+def do_database_delete_collection(database: str | None, collection: str) -> None:
+    """Delete one collection, leaving the parent database and its siblings intact."""
+    tid = require_tenant_id(database)
+    if not (collection or "").strip():
+        print_error("Collection ID cannot be empty.")
+    wrapper = get_wrapper()
+    result = _execute(
+        "Deleting collection...",
+        lambda: wrapper.databases.delete_collection(database=tid, collection=collection),
+    )
+
+    def fmt(_r: dict):
+        # Deletion is asynchronous: the API accepts and purges in the background.
+        # Say that rather than reporting a completion we cannot observe — the
+        # collection stays fenced (404) until every store is purged, and there
+        # is no completion endpoint to poll.
+        return (
+            f"[green]✓[/green] Collection [bold]{collection}[/bold] in database "
+            f"[bold]{tid}[/bold] scheduled for deletion.\n"
+            "[dim]Cleanup runs in the background. The collection rejects reads and writes "
+            "until it finishes; re-run this command to retry a cleanup that failed.[/dim]"
+        )
+
+    print_result(result, fmt)
+
+
 def do_database_collections(tenant_id: str | None = None) -> None:
     tid = require_tenant_id(tenant_id)
     wrapper = get_wrapper()
