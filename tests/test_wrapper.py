@@ -291,3 +291,79 @@ class TestConnectors:
             finally:
                 httpx.get = original
         assert exc.value.status_code == 404
+
+
+class TestDeleteCollection:
+    """The hand-rolled DELETE path, exercised directly rather than mocked.
+
+    ``databases.delete_collection`` bypasses the SDK (the pinned version has no
+    such method), so the command-level tests that patch the wrapper never run
+    this code. These do.
+    """
+
+    def _wrapper(self):
+        return HydraDB(token="tok", base_url="http://test.local", database="db_test")
+
+    def test_empty_collection_raises_the_wrapper_error_not_a_type_error(self):
+        # The command layer already rejects an empty collection, so this guard
+        # only fires for direct callers. It still has to raise the wrapper's
+        # own error: a TypeError here would escape handle_api_error and
+        # traceback instead of printing a message.
+        with pytest.raises(HydraDBClientError) as exc:
+            self._wrapper().databases.delete_collection(collection="   ")
+        assert exc.value.status_code == 0
+        assert "collection" in exc.value.detail.lower()
+
+    def test_sends_a_versioned_delete_and_unwraps_the_envelope(self, monkeypatch):
+        seen = {}
+
+        def fake_request(method, url, **kwargs):
+            seen["method"] = method
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers", {})
+            seen["params"] = kwargs.get("params")
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"status": "deletion_scheduled"}},
+                request=httpx.Request(method, url),
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        out = self._wrapper().databases.delete_collection(database="acme", collection="support")
+
+        assert seen["method"] == "DELETE"
+        assert seen["url"].endswith("/databases/collections")
+        # The fence and its 404 wording live behind API version 2.
+        assert seen["headers"]["API-Version"] == "2"
+        assert seen["headers"]["Authorization"] == "Bearer tok"
+        # Canonical names on the wire. The server's TenantAliases middleware
+        # maps database/collection onto tenant_id/sub_tenant_id, so sending the
+        # canonical pair is correct and keeps the CLI off the deprecated names.
+        assert seen["params"] == {"database": "acme", "collection": "support"}
+        assert out == {"status": "deletion_scheduled"}
+
+    def test_a_fenced_collection_surfaces_the_api_wording(self, monkeypatch):
+        # A collection already being torn down answers 404. The point of
+        # raising HydraDBClientError here is that the API's own message
+        # reaches the user unchanged.
+        def fake_request(method, url, **kwargs):
+            return httpx.Response(
+                404,
+                json={"success": False, "error": {"message": "collection is being deleted"}},
+                request=httpx.Request(method, url),
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        with pytest.raises(HydraDBClientError) as exc:
+            self._wrapper().databases.delete_collection(collection="support")
+        assert exc.value.status_code == 404
+        assert "being deleted" in exc.value.detail
+
+    def test_a_transport_failure_is_status_zero(self, monkeypatch):
+        def fake_request(method, url, **kwargs):
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        with pytest.raises(HydraDBClientError) as exc:
+            self._wrapper().databases.delete_collection(collection="support")
+        assert exc.value.status_code == 0

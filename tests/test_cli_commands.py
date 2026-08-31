@@ -871,3 +871,70 @@ class TestOutputFormat:
         # `whoami` itself is deprecated and warns on stderr; stdout must stay pure JSON.
         assert isinstance(json.loads(result.stdout), dict)
         assert "deprecated" in result.stderr
+
+
+# --- database delete-collection -------------------------------------------
+# Deleting a collection is irreversible and, unlike a database delete, it is
+# easy to confuse with deleting the database itself. These pin the three things
+# that keep that safe: it asks first, it targets the collection the user named,
+# and it never falls through to a database-level delete.
+
+
+def test_delete_collection_requires_confirmation():
+    _auth()
+    w = _wrapper()
+    with _patch_wrapper(w):
+        # Empty stdin declines the prompt.
+        result = runner.invoke(app, ["database", "delete-collection", "team_docs"], input="\n")
+
+    assert result.exit_code != 0
+    w.databases.delete_collection.assert_not_called()
+    w.databases.delete.assert_not_called()
+
+
+def test_delete_collection_proceeds_with_yes():
+    _auth()
+    w = _wrapper(**{"databases.delete_collection": {"status": "deletion_scheduled"}})
+    with _patch_wrapper(w):
+        result = runner.invoke(app, ["database", "delete-collection", "team_docs", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    w.databases.delete_collection.assert_called_once_with(database="t1", collection="team_docs")
+    # The parent database must never be touched by a collection delete.
+    w.databases.delete.assert_not_called()
+
+
+def test_delete_collection_accepts_explicit_database_and_collection_flags():
+    _auth()
+    w = _wrapper(**{"databases.delete_collection": {"status": "deletion_scheduled"}})
+    with _patch_wrapper(w):
+        result = runner.invoke(
+            app,
+            ["database", "delete-collection", "-d", "acme", "-c", "engineering", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    w.databases.delete_collection.assert_called_once_with(database="acme", collection="engineering")
+
+
+def test_delete_collection_without_a_collection_is_rejected():
+    """No collection means no safe default: a delete must not guess one."""
+    _auth()
+    w = _wrapper()
+    with _patch_wrapper(w):
+        result = runner.invoke(app, ["database", "delete-collection", "--yes"])
+
+    assert result.exit_code != 0
+    w.databases.delete_collection.assert_not_called()
+
+
+def test_delete_collection_reports_async_cleanup():
+    """The API accepts and purges in the background, so do not claim it is done."""
+    _auth()
+    w = _wrapper(**{"databases.delete_collection": {"status": "deletion_scheduled"}})
+    with _patch_wrapper(w):
+        result = runner.invoke(app, ["database", "delete-collection", "team_docs", "--yes"])
+
+    out = _ANSI_RE.sub("", result.output).lower()
+    assert "scheduled for deletion" in out
+    assert "background" in out
