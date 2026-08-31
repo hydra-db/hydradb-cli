@@ -159,7 +159,7 @@ class _Databases(_Resource):
         """
         db = self._w._require_database(database)
         if not (collection or "").strip():
-            raise HydraDBClientError("collection is required")
+            raise HydraDBClientError(0, "collection is required")
         url = f"{self._w._base_url.rstrip('/')}/databases/collections"
         headers = {
             "Authorization": f"Bearer {self._w._token}",
