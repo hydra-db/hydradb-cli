@@ -192,6 +192,23 @@ def relations(
     _impl.do_relations(source_id, kind=kind, limit=limit, tenant_id=tid, sub_tenant_id=stid)
 
 
+def subgraph(
+    source_id: str = typer.Argument(help="Item ID to start from (from 'hydradb query' or 'hydradb list')."),
+    kind: str | None = typer.Option(None, "--kind", help="Corpus: 'knowledge' (default) or 'memory'."),
+    depth: int | None = typer.Option(None, "--depth", help="Hops to traverse (1–10; server default 5)."),
+    max_sources: int | None = typer.Option(None, "--max-sources", help="Cap on members returned (server default 200)."),
+    database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
+    collection: str | None = typer.Option(None, "--collection", help="Collection."),
+    tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
+    sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
+) -> None:
+    """Everything connected to one item: its thread, replies, parents, children, links."""
+    tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
+    _impl.do_subgraph(
+        source_id, kind=kind, depth=depth, max_sources=max_sources, tenant_id=tid, sub_tenant_id=stid
+    )
+
+
 def verify(
     ids: list[str] = typer.Argument(help="One or more source IDs to check."),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),

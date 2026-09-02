@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from hydra_db import HydraDB as _SdkHydraDB
@@ -380,6 +381,43 @@ class _Context(_Resource):
         )
         return _unwrap(resp)
 
+    def subgraph(
+        self,
+        *,
+        id: str,
+        kind: str | None = None,
+        depth: int | None = None,
+        max_sources: int | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> dict:
+        """The connected subgraph of one item (``GET /context/{id}/subgraph``).
+
+        Every item reachable from ``id`` through item-level relations — explicit
+        links declared at ingest, a shared thread, parent/child hierarchy — plus
+        the relations among the members and the structural graph around them.
+
+        No SDK resource for this yet (CONTRACT §2 rule 7), so it takes the raw
+        path behind the same surface: same headers, same envelope unwrap, same
+        :class:`HydraDBClientError`. When the SDK grows ``context.subgraph``,
+        only this method changes.
+        """
+        params: dict[str, Any] = {
+            "database": self._w._require_database(database),
+        }
+        col = self._w._resolve_collection(collection)
+        if col:
+            params["collection"] = col
+        if kind:
+            params["type"] = kind
+        if depth is not None:
+            params["depth"] = depth
+        if max_sources is not None:
+            params["max_sources"] = max_sources
+        # The id is a path segment: escape it, or an id with a slash walks the
+        # request to a different route.
+        return self._w._raw_get(f"/context/{quote(id, safe='')}/subgraph", params=params)
+
     def ingestion_status(
         self,
         *,
@@ -708,7 +746,8 @@ class HydraDB:
     def _raw_get(self, path: str, *, params: dict | None = None) -> Any:
         """GET an endpoint the SDK does not expose, with the same error contract.
 
-        Used only for ``/connectors/providers``. It sends the same auth and
+        Used for ``/connectors/providers`` and ``/context/{id}/subgraph``. It
+        sends the same auth and
         ``API-Version: 2`` headers the SDK does, unwraps the envelope by shape,
         and raises the same :class:`HydraDBClientError`, so a caller cannot tell
         it apart from an SDK call and ``handle_api_error`` works unchanged.
