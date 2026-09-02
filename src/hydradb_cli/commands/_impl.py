@@ -113,6 +113,7 @@ def do_query(
     recency_bias: float | None = None,
     graph_context: bool | None = None,
     additional_context: str | None = None,
+    acl: list[str] | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     spinner_msg: str = "Searching...",
@@ -149,6 +150,7 @@ def do_query(
             recency_bias=recency_bias,
             graph_context=graph_context,
             additional_context=additional_context,
+            acl=acl,
             database=tid,
             collection=stid,
         ),
@@ -342,6 +344,7 @@ def do_list(
     kind: str | None = None,
     page: int | None = None,
     page_size: int | None = None,
+    acl: list[str] | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     spinner_msg: str = "Fetching sources...",
@@ -363,6 +366,7 @@ def do_list(
             kind=kind,
             page=page,
             page_size=page_size,
+            acl=acl,
             database=tid,
             collection=stid,
         ),
@@ -403,6 +407,7 @@ def do_inspect(
     source_id: str,
     *,
     mode: str = "content",
+    acl: list[str] | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
@@ -417,7 +422,7 @@ def do_inspect(
 
     try:
         with spinner("Fetching content..."):
-            result = wrapper.context.inspect(id=source_id, mode=mode, database=tid, collection=stid)
+            result = wrapper.context.inspect(id=source_id, mode=mode, acl=acl, database=tid, collection=stid)
     except HydraDBClientError as e:
         if e.status_code == 404:
             print_error(
@@ -504,6 +509,7 @@ def do_relations(
     *,
     kind: str | None = None,
     limit: int | None = None,
+    acl: list[str] | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
@@ -520,7 +526,7 @@ def do_relations(
 
     result = _execute(
         "Fetching graph relations...",
-        lambda: wrapper.context.relations(id=source_id, kind=kind, limit=limit, database=tid, collection=stid),
+        lambda: wrapper.context.relations(id=source_id, kind=kind, limit=limit, acl=acl, database=tid, collection=stid),
     )
 
     def fmt(r: dict):
