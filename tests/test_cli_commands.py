@@ -426,6 +426,50 @@ class TestListInspectDeleteRelationsVerify:
         assert result.exit_code == 0
         assert "clipped" in result.output
 
+    def test_subgraph_clipped_single_member_is_not_isolated(self):
+        """One member plus is_truncated is where the traversal stopped, not proof
+        that the item is unconnected. Saying "stands alone" there is a wrong
+        answer: --max-sources 1 would report every connected item as isolated."""
+        _auth()
+        w = _wrapper(
+            **{
+                "context.subgraph": {
+                    "sources": [{"source_id": "a", "depth": 0}],
+                    "is_truncated": True,
+                    "max_depth_reached": 0,
+                    "success": True,
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "a", "--max-sources", "1"], env=_WIDE)
+        assert result.exit_code == 0, result.output
+        assert "stands alone" not in result.output
+        assert "clipped" in result.output
+        assert "1 item connected" in result.output
+
+    def test_subgraph_metadata_is_shown_not_parsed_as_markup(self):
+        """Rich reads [square brackets] as style tags. A title like "[draft] Q3"
+        would be styled away, so the reader would never see it."""
+        _auth()
+        w = _wrapper(
+            **{
+                "context.subgraph": {
+                    "sources": [
+                        {"source_id": "a", "title": "[draft] Q3 plan", "depth": 0},
+                        {"source_id": "b", "title": "plain", "depth": 1},
+                    ],
+                    "is_truncated": False,
+                    "max_depth_reached": 1,
+                    "success": True,
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "a"], env=_WIDE)
+        assert result.exit_code == 0, result.output
+        assert "[draft]" in result.output
+
     def test_subgraph_validates_depth_before_the_network(self):
         _auth()
         w = _wrapper()

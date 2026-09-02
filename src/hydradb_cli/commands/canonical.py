@@ -204,9 +204,7 @@ def subgraph(
 ) -> None:
     """Everything connected to one item: its thread, replies, parents, children, links."""
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_subgraph(
-        source_id, kind=kind, depth=depth, max_sources=max_sources, tenant_id=tid, sub_tenant_id=stid
-    )
+    _impl.do_subgraph(source_id, kind=kind, depth=depth, max_sources=max_sources, tenant_id=tid, sub_tenant_id=stid)
 
 
 def verify(

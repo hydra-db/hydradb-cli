@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 from rich.console import Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -587,7 +588,7 @@ def do_subgraph(
         if not members:
             # An unknown id is an answer, not an error: the server says so with
             # an empty member list rather than a 404, and this says the same.
-            return f"[dim]No item '{source_id}' in this collection, so there is no subgraph to show.[/dim]"
+            return f"[dim]No item '{escape(source_id)}' in this collection, so there is no subgraph to show.[/dim]"
         hops = r.get("max_depth_reached") or 0
 
         # discovered_relation is the MECHANISM (same_thread, parent, child, or
@@ -611,10 +612,14 @@ def do_subgraph(
                 [str(d), m.get("source_id", "?"), m.get("title") or m.get("app_external_id") or "", what, reached]
             )
         n = len(members)
-        if n == 1:
-            headline = f"{source_id} stands alone: nothing in the graph links to it yet."
+        # One member means "nothing links to this" only when the traversal ran
+        # to completion. Clipped at --max-sources, one row is just where we
+        # stopped looking, and calling a connected item isolated is a wrong
+        # answer rather than a terse one.
+        if n == 1 and not r.get("is_truncated"):
+            headline = f"{escape(source_id)} stands alone: nothing in the graph links to it yet."
         else:
-            headline = f"{n} items connected through {hops} hop{'' if hops == 1 else 's'}"
+            headline = f"{n} item{'' if n == 1 else 's'} connected through {hops} hop{'' if hops == 1 else 's'}"
             if r.get("is_truncated"):
                 headline += "  [yellow](clipped at --max-sources; the subgraph continues)[/yellow]"
         footer = (
@@ -628,7 +633,7 @@ def do_subgraph(
         # ordinary id mid-token.
         return Panel(
             Group(headline, table, footer),
-            title=f"[bold cyan]/// Subgraph: {source_id}[/bold cyan]",
+            title=f"[bold cyan]/// Subgraph: {escape(source_id)}[/bold cyan]",
             border_style="cyan",
             padding=(0, 1),
         )

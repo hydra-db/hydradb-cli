@@ -281,7 +281,9 @@ class TestConnectors:
         def handler(request: httpx.Request):
             seen["url"] = str(request.url)
             seen["headers"] = dict(request.headers)
-            return httpx.Response(200, json={"success": True, "data": {"seed_source_id": "a b", "sources": []}, "meta": {}})
+            return httpx.Response(
+                200, json={"success": True, "data": {"seed_source_id": "a b", "sources": []}, "meta": {}}
+            )
 
         w = _wrapper_with_response({}, captured={})
         transport = httpx.MockTransport(handler)
@@ -294,7 +296,9 @@ class TestConnectors:
 
             httpx.get = fake_get
             try:
-                out = w.context.subgraph(id="a b", kind="memory", depth=2, max_sources=10, database="db1", collection="c1")
+                out = w.context.subgraph(
+                    id="a b", kind="memory", depth=2, max_sources=10, database="db1", collection="c1"
+                )
             finally:
                 httpx.get = original
         assert out == {"seed_source_id": "a b", "sources": []}, "envelope unwrapped by shape"
@@ -308,7 +312,9 @@ class TestConnectors:
         from hydradb_cli.hydra import HydraDBClientError
 
         w = _wrapper_with_response({}, captured={})
-        transport = httpx.MockTransport(lambda request: httpx.Response(400, json={"error": {"message": "depth must be a positive integer"}}))
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(400, json={"error": {"message": "depth must be a positive integer"}})
+        )
         with httpx.Client(transport=transport) as client:
             original = httpx.get
 
