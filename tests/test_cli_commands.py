@@ -361,7 +361,15 @@ class TestListInspectDeleteRelationsVerify:
                 "context.subgraph": {
                     "seed_source_id": "src_1",
                     "sources": [
-                        {"source_id": "reply_2", "title": "re: budget", "depth": 1, "discovered_via": "thread", "discovered_relation": "same_thread", "app_provider": "slack"},
+                        # discovered_via is the member it was reached FROM, not a mechanism.
+                        {
+                            "source_id": "reply_2",
+                            "title": "re: budget",
+                            "depth": 1,
+                            "discovered_via": "src_1",
+                            "discovered_relation": "same_thread",
+                            "app_provider": "slack",
+                        },
                         {"source_id": "src_1", "title": "Q3 budget", "depth": 0},
                     ],
                     "relations": [{}],
@@ -378,7 +386,8 @@ class TestListInspectDeleteRelationsVerify:
         assert result.exit_code == 0, result.output
         assert "2 items connected through 1 hop" in result.output
         assert "reply_2" in result.output and "re: budget" in result.output
-        assert "thread · same_thread" in result.output
+        assert "same_thread ← src_1" in result.output
+        assert "Reached by" in result.output
         assert any("/// Subgraph: src_1" in line for line in _lines(result))
         kw = w.context.subgraph.call_args.kwargs
         assert kw["id"] == "src_1" and kw["depth"] == 2 and kw["max_sources"] == 50

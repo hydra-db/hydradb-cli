@@ -589,14 +589,27 @@ def do_subgraph(
             # an empty member list rather than a 404, and this says the same.
             return f"[dim]No item '{source_id}' in this collection, so there is no subgraph to show.[/dim]"
         hops = r.get("max_depth_reached") or 0
+
+        # discovered_relation is the MECHANISM (same_thread, parent, child, or
+        # a relates_to type); discovered_via is the member this one was
+        # reached FROM — another row's id, so the table is also a tree. The
+        # parent id is shortened here because it has its own row in full.
+        def short(i: str) -> str:
+            return i[:12] + "…" if len(i) > 14 else i
+
         rows = []
         for m in sorted(members, key=lambda m: (m.get("depth", 0), m.get("source_id", ""))):
             d = m.get("depth", 0)
-            via = "start" if d == 0 else " · ".join(
-                x for x in (m.get("discovered_via"), m.get("discovered_relation")) if x
-            ) or "connected"
+            if d == 0:
+                reached = "start"
+            else:
+                reached = m.get("discovered_relation") or "linked"
+                if m.get("discovered_via"):
+                    reached += f" ← {short(m['discovered_via'])}"
             what = " ".join(x for x in (m.get("app_provider"), m.get("app_kind")) if x)
-            rows.append([str(d), m.get("source_id", "?"), m.get("title") or m.get("app_external_id") or "", what, via])
+            rows.append(
+                [str(d), m.get("source_id", "?"), m.get("title") or m.get("app_external_id") or "", what, reached]
+            )
         n = len(members)
         if n == 1:
             headline = f"{source_id} stands alone: nothing in the graph links to it yet."
@@ -609,7 +622,7 @@ def do_subgraph(
             f"{len(r.get('auxiliary_relations') or [])} structural link(s) around them"
             + ("  [yellow](structural links clipped)[/yellow]" if r.get("auxiliary_truncated") else "")
         )
-        table = make_table("Depth", "Item", "Title", "Kind", "Via", rows=rows)
+        table = make_table("Depth", "Item", "Title", "Kind", "Reached by", rows=rows)
         # Title on a Panel, not on the Table, for the same reason as
         # `relations`: a table title wraps to the table's width and breaks an
         # ordinary id mid-token.
