@@ -17,7 +17,7 @@ from hydra_db.errors.not_found_error import NotFoundError
 from hydra_db.types.handler_error_response import HandlerErrorResponse
 
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
-from hydradb_cli.hydra.client import _bool_str, _is_envelope, _unwrap, _Connectors
+from hydradb_cli.hydra.client import _bool_str, _Connectors, _is_envelope, _unwrap
 
 
 def _multipart_fields(request: httpx.Request) -> dict:
@@ -298,11 +298,15 @@ class TestACL:
     """PRO-1684: the caller declares the principals to answer as, and every
     read that the API scopes by ACL must carry them to the wire.
 
-    The distinction that matters is `omitted` vs `empty`. An omitted acl means
-    "no ACL scoping, return everything this key can reach"; an empty list is a
-    real value meaning "private, admits nobody". Sending [] for a caller who
-    simply did not pass --acl would silently return nothing, so the wrapper
-    must send no key at all in that case.
+    The API treats an EMPTY acl exactly like an absent one (verified against
+    staging: `acl: []` and no acl both returned 134 sources in a database where
+    an unknown principal returned 130). [] is therefore not a way to ask for
+    "nobody" — the design doc's rule is that absent and [] alike mean
+    unrestricted, with __private__ as the marker that admits nobody.
+
+    The wrapper still sends no key at all when the caller passed no --acl, so
+    the request says what the caller said rather than leaning on that
+    equivalence holding forever.
     """
 
     def test_query_sends_acl_principals(self):
@@ -317,7 +321,7 @@ class TestACL:
         w = _wrapper_with_response({"chunks": []}, captured=captured)
         w.context.query(query="q")
         body = json.loads(captured["request"].content)
-        assert "acl" not in body, "an omitted acl must not become [] (which means private)"
+        assert "acl" not in body, "an omitted acl must be absent from the request, not []"
 
     def test_list_sends_acl_principals(self):
         captured = {}

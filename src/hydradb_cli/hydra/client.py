@@ -683,8 +683,7 @@ class _Connectors(_Resource):
         # A rename we have not seen. Say so plainly instead of failing with a
         # bare AttributeError from somewhere inside the generated client.
         raise AttributeError(
-            "hydradb-sdk exposes no known credential-rotation method; tried: "
-            + ", ".join(self._ROTATE_SDK_NAMES)
+            "hydradb-sdk exposes no known credential-rotation method; tried: " + ", ".join(self._ROTATE_SDK_NAMES)
         )
 
 

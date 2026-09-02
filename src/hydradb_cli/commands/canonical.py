@@ -57,7 +57,11 @@ def query(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
-    acl: list[str] | None = typer.Option(None, "--acl", help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -138,7 +142,11 @@ def list_items(
     kind: str | None = typer.Option(None, "--kind", help="Filter by kind: 'memory' or 'knowledge'."),
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
-    acl: list[str] | None = typer.Option(None, "--acl", help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -154,7 +162,11 @@ def list_items(
 def inspect(
     source_id: str = typer.Argument(help="Source ID to inspect."),
     mode: str = typer.Option("content", "--mode", help="Fetch mode: 'content', 'url', or 'both'."),
-    acl: list[str] | None = typer.Option(None, "--acl", help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -188,7 +200,11 @@ def relations(
     source_id: str = typer.Argument(help="Source ID to fetch graph relations for."),
     kind: str | None = typer.Option(None, "--kind", help="Corpus: 'memory' or 'knowledge'."),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
-    acl: list[str] | None = typer.Option(None, "--acl", help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),

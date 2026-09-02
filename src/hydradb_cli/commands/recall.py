@@ -26,6 +26,9 @@ def full_recall(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
+    acl: list[str] | None = typer.Option(
+        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+    ),
 ) -> None:
     """[dim](deprecated)[/dim] Search indexed knowledge — use 'hydradb query --kind knowledge'."""
     warn_deprecated("recall full", "query --kind knowledge")
@@ -38,6 +41,7 @@ def full_recall(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
+        acl=list(acl) if acl else None,
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )
@@ -56,6 +60,9 @@ def recall_preferences(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
+    acl: list[str] | None = typer.Option(
+        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+    ),
 ) -> None:
     """[dim](deprecated)[/dim] Search user memories — use 'hydradb query --kind memory'."""
     warn_deprecated("recall preferences", "query --kind memory")
@@ -68,6 +75,7 @@ def recall_preferences(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
+        acl=list(acl) if acl else None,
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
         spinner_msg="Searching memories...",
@@ -84,6 +92,9 @@ def keyword_recall(
     search_mode: str | None = typer.Option(
         None, "--search-mode", help="What to search: 'sources' (knowledge) or 'memories'."
     ),
+    acl: list[str] | None = typer.Option(
+        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+    ),
 ) -> None:
     """[dim](deprecated)[/dim] Keyword/boolean search — use 'hydradb query --operator'."""
     warn_deprecated("recall keyword", "query --operator")
@@ -93,6 +104,7 @@ def keyword_recall(
         kind=kind,
         operator=operator,
         max_results=max_results,
+        acl=list(acl) if acl else None,
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )
