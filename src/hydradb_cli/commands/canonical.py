@@ -222,6 +222,11 @@ def subgraph(
     kind: str | None = typer.Option(None, "--kind", help="Corpus: 'knowledge' (default) or 'memory'."),
     depth: int | None = typer.Option(None, "--depth", help="Hops to traverse (1–10; server default 5)."),
     max_sources: int | None = typer.Option(None, "--max-sources", help="Cap on members returned (server default 200)."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). The subgraph contains only items those principals may see. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -229,7 +234,15 @@ def subgraph(
 ) -> None:
     """Everything connected to one item: its thread, replies, parents, children, links."""
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_subgraph(source_id, kind=kind, depth=depth, max_sources=max_sources, tenant_id=tid, sub_tenant_id=stid)
+    _impl.do_subgraph(
+        source_id,
+        kind=kind,
+        depth=depth,
+        max_sources=max_sources,
+        acl=list(acl) if acl else None,
+        tenant_id=tid,
+        sub_tenant_id=stid,
+    )
 
 
 def verify(

@@ -392,6 +392,25 @@ class TestListInspectDeleteRelationsVerify:
         kw = w.context.subgraph.call_args.kwargs
         assert kw["id"] == "src_1" and kw["depth"] == 2 and kw["max_sources"] == 50
 
+    def test_subgraph_forwards_acl(self):
+        _auth()
+        w = _wrapper(
+            **{
+                "context.subgraph": {
+                    "seed_source_id": "src_1",
+                    "sources": [{"source_id": "src_1", "depth": 0}],
+                    "success": True,
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(
+                app, ["subgraph", "src_1", "--acl", "alice@corp.com", "--acl", "bob@corp.com"], env=_WIDE
+            )
+        assert result.exit_code == 0, result.output
+        kw = w.context.subgraph.call_args.kwargs
+        assert kw["acl"] == ["alice@corp.com", "bob@corp.com"], kw
+
     def test_subgraph_json_is_the_payload(self):
         _auth()
         payload = {"seed_source_id": "src_1", "sources": [{"source_id": "src_1", "depth": 0}], "success": True}
