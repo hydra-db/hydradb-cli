@@ -202,8 +202,11 @@ class _Databases(_Resource):
         return _unwrap(resp)
 
     def list(self) -> dict:
-        resp = self._invoke(self._w._sdk.databases.list)
-        return _unwrap(resp)
+        """``GET /databases``. Hand-rolled rather than the SDK call because the
+        pinned SDK's response model predates ``details[]`` (PRO-1618) and would
+        drop every database's layout on the way through."""
+        result = self._raw("GET", "/databases")
+        return result if isinstance(result, dict) else {}
 
     def layouts(self) -> dict[str, str]:
         """Every database this key can see, mapped to its storage layout,
@@ -212,7 +215,7 @@ class _Databases(_Resource):
         cached = getattr(self._w, "_layouts", None)
         if cached is not None:
             return cached
-        listed = self._raw("GET", "/databases")
+        listed = self.list()
         layouts: dict[str, str] = {}
         for row in (listed.get("details") or []) if isinstance(listed, dict) else []:
             if isinstance(row, dict) and row.get("database"):

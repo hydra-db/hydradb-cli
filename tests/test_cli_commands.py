@@ -1068,6 +1068,13 @@ class TestUnifiedWrapper:
         assert len(calls) == 1
         assert calls[0][0] == "GET" and calls[0][1] == "https://api.test/databases"
 
+    def test_list_goes_raw_so_details_survive(self, monkeypatch):
+        calls = self._capture(monkeypatch, {"databases": ["a"], "details": [{"database": "a", "type": "unified"}]})
+        w = self._wrapper()
+        listed = w.databases.list()
+        assert listed["details"] == [{"database": "a", "type": "unified"}]
+        assert calls[0][0] == "GET" and calls[0][1] == "https://api.test/databases"
+
     def test_layout_reads_split_when_the_probe_fails(self, monkeypatch):
         def boom(method, url, **kwargs):
             raise RuntimeError("down")
