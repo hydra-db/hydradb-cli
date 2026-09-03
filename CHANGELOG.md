@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Unified databases (PRO-1618).** `hydradb database create <name> --type unified` provisions a database with ONE corpus instead of separate knowledge and memory corpora. On such a database `query`, `list`, `delete` and `relations` default `--kind` to `unified` (the only value the server accepts there; `memory`/`knowledge` are refused with a 400), and `ingest --text` sends the unified `items[]` shape. The layout is read once per process from `GET /databases` (`details[].type`), so nothing changes for a split database: every existing default is exactly what it was, and a probe that fails reads as split. `database list` shows each database's type. File ingest is refused on a unified database with a message pointing at `--text`, because a unified database is text-only.
+
+  The pinned SDK predates the change (no `type` on create, no `items` on ingest, no `details[]`), so those three calls go over the wrapper's hand-rolled v2 path (`_Resource._raw`, the same path `graph` already uses) with the same headers, envelope unwrap and error translation. When the regenerated SDK lands they move back onto it and no caller changes.
+
+### Added
+
 - **`hydradb graph` — full Cypher over graph collections you own (BYOG).** HydraDB's graph database offering had no CLI surface at all: `query`, `ingest` and the rest address the memory and knowledge corpora, and the property graphs users model and own end to end were reachable only through the raw API. This adds `graph query`, `graph collections`, `graph load`, `graph database create/delete` and `graph collection delete`. Everything existing is untouched — the two stores are separate, and nothing crosses between them.
 
   `graph query` takes parameters through `--param k=v` (values parse as JSON when they can, so `--param n=3` is the number 3) or `--params-json`. `--output json` prints the rows verbatim, so `hydradb graph query ... | jq '.[].name'` works without unwrapping an envelope.

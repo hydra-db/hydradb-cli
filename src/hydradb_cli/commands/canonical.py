@@ -47,7 +47,11 @@ def _resolve_text_input(text: str | None) -> str:
 
 def query(
     query_text: str = typer.Argument(metavar="QUERY", help="Search query."),
-    kind: str | None = typer.Option(None, "--kind", help="Corpus to query: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Corpus to query: 'memory' or 'knowledge' (split database), 'unified' (unified database, the default there).",
+    ),
     operator: str | None = typer.Option(None, "--operator", help="Keyword operator: 'or', 'and', or 'phrase'."),
     max_results: int = typer.Option(10, "--max-results", "-n", help="Maximum number of results (1-50)."),
     mode: str | None = typer.Option(None, "--mode", "-m", help="Retrieval mode: 'fast' or 'thinking'."),
@@ -81,7 +85,11 @@ def query(
 
 def ingest(
     files: list[str] | None = typer.Argument(None, help="Knowledge file path(s) to ingest."),
-    kind: str | None = typer.Option(None, "--kind", help="Kind to ingest: 'memory' (default) or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Kind to ingest: 'memory' (default) or 'knowledge'; on a unified database everything is 'unified'.",
+    ),
     text: str | None = typer.Option(None, "--text", "-t", help="Text to ingest. Use '-' to read from stdin."),
     title: str | None = typer.Option(None, "--title", help="Optional title."),
     source_id: str | None = typer.Option(None, "--source-id", help="Source identifier."),
@@ -133,7 +141,11 @@ def ingest(
 
 
 def list_items(
-    kind: str | None = typer.Option(None, "--kind", help="Filter by kind: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Filter by kind: 'memory' or 'knowledge' (split database); omit on a unified database to list everything.",
+    ),
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
@@ -161,7 +173,11 @@ def inspect(
 
 def delete(
     ids: list[str] = typer.Argument(help="One or more IDs to delete."),
-    kind: str = typer.Option("knowledge", "--kind", help="Kind to delete: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Kind to delete: 'knowledge' (default) or 'memory' on a split database; 'unified' (the default) on a unified one.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -180,7 +196,9 @@ def delete(
 
 def relations(
     source_id: str = typer.Argument(help="Source ID to fetch graph relations for."),
-    kind: str | None = typer.Option(None, "--kind", help="Corpus: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None, "--kind", help="Corpus: 'memory' or 'knowledge' (split database); omit on a unified one."
+    ),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -259,9 +277,14 @@ def doctor() -> None:
 @database_app.command("create")
 def database_create(
     database: str = typer.Argument(help="Unique database identifier."),
+    layout: str | None = typer.Option(
+        None,
+        "--type",
+        help="Storage layout: 'split' (default; separate knowledge and memory corpora) or 'unified' (one corpus, no --kind needed on later commands).",
+    ),
 ) -> None:
     """Create a new database."""
-    _impl.do_database_create(database)
+    _impl.do_database_create(database, layout)
 
 
 @database_app.command("delete")

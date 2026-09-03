@@ -871,3 +871,207 @@ class TestOutputFormat:
         # `whoami` itself is deprecated and warns on stderr; stdout must stay pure JSON.
         assert isinstance(json.loads(result.stdout), dict)
         assert "deprecated" in result.stderr
+
+
+class TestUnifiedDatabases:
+    """PRO-1618: a database created with ``--type unified`` has one corpus.
+
+    The CLI reads the layout once (``databases.layout``) and switches every
+    host-owned default to ``unified`` there, so a user never has to name a
+    kind the server would refuse. On a split database nothing changes.
+    """
+
+    def test_database_create_type_unified(self):
+        _auth()
+        w = _wrapper(**{"databases.create": {"success": True}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["database", "create", "new-db", "--type", "unified"])
+        assert result.exit_code == 0
+        assert w.databases.create.call_args.kwargs["type"] == "unified"
+        assert "unified" in result.output
+
+    def test_database_create_without_type_sends_none(self):
+        _auth()
+        w = _wrapper(**{"databases.create": {"success": True}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["database", "create", "new-db"])
+        assert result.exit_code == 0
+        assert w.databases.create.call_args.kwargs["type"] is None
+
+    def test_database_create_rejects_unknown_type(self):
+        _auth()
+        w = _wrapper()
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["database", "create", "new-db", "--type", "hybrid"])
+        assert result.exit_code != 0
+        assert "split" in result.output and "unified" in result.output
+        w.databases.create.assert_not_called()
+
+    def test_database_list_shows_layout(self):
+        _auth()
+        w = _wrapper(
+            **{
+                "databases.list": {
+                    "databases": ["a", "b"],
+                    "details": [{"database": "a", "type": "unified"}, {"database": "b", "type": "split"}],
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["database", "list"], env=_WIDE)
+        assert result.exit_code == 0
+        lines = _lines(result)
+        assert any("a" in line.split() and "unified" in line for line in lines), lines
+        assert any("b" in line.split() and "split" in line for line in lines), lines
+
+    def test_query_defaults_to_unified_on_a_unified_database(self):
+        _auth()
+        w = _wrapper(**{"context.query": {"chunks": []}, "databases.layout": "unified"})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "anything"])
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["kind"] == "unified"
+
+    def test_query_keeps_no_kind_on_a_split_database(self):
+        _auth()
+        w = _wrapper(**{"context.query": {"chunks": []}, "databases.layout": "split"})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "anything"])
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["kind"] is None
+
+    def test_explicit_kind_is_never_overridden(self):
+        _auth()
+        w = _wrapper(**{"context.query": {"chunks": []}, "databases.layout": "unified"})
+        with _patch_wrapper(w):
+            runner.invoke(app, ["query", "anything", "--kind", "memory"])
+        # The server refuses it with a message naming the rule; the CLI must
+        # not silently substitute a different kind than the one asked for.
+        assert w.context.query.call_args.kwargs["kind"] == "memory"
+
+    def test_ingest_text_goes_unified(self):
+        _auth()
+        w = _wrapper(
+            **{"context.ingest": {"success_count": 1, "failed_count": 0, "results": []}, "databases.layout": "unified"}
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--text", "User prefers dark mode"])
+        assert result.exit_code == 0
+        assert w.context.ingest.call_args.kwargs["kind"] == "unified"
+
+    def test_ingest_files_refused_on_a_unified_database(self, tmp_path):
+        _auth()
+        f = tmp_path / "doc.txt"
+        f.write_text("hello")
+        w = _wrapper(**{"databases.layout": "unified"})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", str(f)])
+        assert result.exit_code != 0
+        assert "unified" in result.output
+        w.context.ingest_many.assert_not_called()
+
+    def test_delete_defaults_to_unified(self):
+        _auth()
+        w = _wrapper(**{"context.delete": {"success": True, "deleted_count": 1}, "databases.layout": "unified"})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["delete", "item-1", "--yes"])
+        assert result.exit_code == 0
+        assert w.context.delete.call_args.kwargs["kind"] == "unified"
+
+    def test_delete_defaults_to_knowledge_on_split(self):
+        _auth()
+        w = _wrapper(**{"context.delete": {"success": True, "deleted_count": 1}, "databases.layout": "split"})
+        with _patch_wrapper(w):
+            runner.invoke(app, ["delete", "item-1", "--yes"])
+        assert w.context.delete.call_args.kwargs["kind"] == "knowledge"
+
+    def test_list_defaults_to_unified(self):
+        _auth()
+        w = _wrapper(**{"context.list": {"sources": [], "total": 0}, "databases.layout": "unified"})
+        with _patch_wrapper(w):
+            runner.invoke(app, ["list"])
+        assert w.context.list.call_args.kwargs["kind"] == "unified"
+
+
+class TestUnifiedWrapper:
+    """The hand-rolled v2 calls the pinned SDK cannot make yet."""
+
+    @staticmethod
+    def _capture(monkeypatch, payload):
+        calls = []
+
+        class _Resp:
+            status_code = 200
+            is_error = False
+            content = b"x"
+
+            @staticmethod
+            def json():
+                return {"success": True, "data": payload}
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return _Resp()
+
+        monkeypatch.setattr("hydradb_cli.hydra.client.httpx.request", fake_request)
+        return calls
+
+    @staticmethod
+    def _wrapper():
+        from hydradb_cli.hydra.client import HydraDB
+
+        return HydraDB(token="k", base_url="https://api.test", database="db1", collection="c1")
+
+    def test_ingest_items_posts_the_unified_json_body(self, monkeypatch):
+        calls = self._capture(monkeypatch, {"success_count": 1})
+        w = self._wrapper()
+        out = w.context.ingest(kind="unified", text="note", title="T", source_id="ctx-1", infer=False)
+        assert out == {"success_count": 1}
+        method, url, kwargs = calls[0]
+        assert (method, url) == ("POST", "https://api.test/context/ingest")
+        assert kwargs["headers"]["API-Version"] == "2"
+        body = kwargs["json"]
+        assert body["database"] == "db1" and body["collection"] == "c1"
+        assert body["items"] == [{"enrich": False, "text": "note", "title": "T", "context_id": "ctx-1"}]
+
+    def test_ingest_unified_refuses_files(self, monkeypatch):
+        self._capture(monkeypatch, {})
+        w = self._wrapper()
+        with pytest.raises(ValueError, match="text only"):
+            w.context.ingest(kind="unified", documents=("f.txt", b"x", None))
+
+    def test_create_with_type_posts_json(self, monkeypatch):
+        calls = self._capture(monkeypatch, {"success": True})
+        w = self._wrapper()
+        w.databases.create(database="new", type="unified")
+        method, url, kwargs = calls[0]
+        assert (method, url) == ("POST", "https://api.test/databases")
+        assert kwargs["json"] == {"database": "new", "type": "unified"}
+
+    def test_create_rejects_unknown_type(self):
+        w = self._wrapper()
+        with pytest.raises(ValueError):
+            w.databases.create(database="new", type="hybrid")
+
+    def test_layout_reads_details_and_memoises(self, monkeypatch):
+        calls = self._capture(
+            monkeypatch,
+            {
+                "databases": ["a", "b"],
+                "details": [{"database": "a", "type": "unified"}, {"database": "b", "type": "split"}],
+            },
+        )
+        w = self._wrapper()
+        assert w.databases.layout("a") == "unified"
+        assert w.databases.layout("b") == "split"
+        assert w.databases.layout("missing") == "split"
+        assert len(calls) == 1
+        assert calls[0][0] == "GET" and calls[0][1] == "https://api.test/databases"
+
+    def test_layout_reads_split_when_the_probe_fails(self, monkeypatch):
+        def boom(method, url, **kwargs):
+            raise RuntimeError("down")
+
+        monkeypatch.setattr("hydradb_cli.hydra.client.httpx.request", boom)
+        w = self._wrapper()
+        assert w.databases.layout("a") == "split"

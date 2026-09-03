@@ -217,7 +217,7 @@ Retrieve knowledge or memories — the single entry point for search.
 
 | Option | Description |
 |--------|-------------|
-| `--kind` | Corpus to search: `memory` or `knowledge`. Omit to search both |
+| `--kind` | Corpus to search: `memory` or `knowledge` on a split database (omit to search both); on a unified database omit it or pass `unified` |
 | `--operator` | Keyword operator: `or`, `and`, `phrase` |
 | `--max-results` / `-n` | Maximum results, 1–50 (default `10`) |
 | `--mode` / `-m` | Retrieval mode: `fast` or `thinking` |
@@ -242,7 +242,7 @@ file arguments are always knowledge sources.
 
 | Option | Description |
 |--------|-------------|
-| `--kind` | `memory` (default) or `knowledge` |
+| `--kind` | `memory` (default) or `knowledge`; on a unified database everything is `unified` and this is chosen for you |
 | `--text` / `-t` | Text to ingest. Use `-` to read from stdin |
 | `--title` | Optional title |
 | `--source-id` | Client-assigned source identifier |
@@ -307,7 +307,7 @@ Create and manage databases.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `database create <database>` | Provisions a new database | — |
+| `database create <database> [--type split\|unified]` | Provisions a new database; `--type unified` gives it ONE corpus (no `--kind` needed on later commands) | — |
 | `database list` | Lists all databases for the authenticated user | — |
 | `database collections [database]` | Lists collections within a database | — |
 | `database stats [database]` | Row-count statistics | — |
@@ -317,6 +317,7 @@ Create and manage databases.
 
 ```bash
 hydradb database create my-new-database
+hydradb database create my-unified-database --type unified
 hydradb database readiness
 hydradb database collections
 hydradb database delete old-database --yes
