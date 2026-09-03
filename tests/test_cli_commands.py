@@ -126,7 +126,7 @@ class TestVersionHelp:
     def test_main_help_lists_canonical_and_aliases(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        for name in ("query", "ingest", "list", "inspect", "delete", "relations", "database", "doctor"):
+        for name in ("query", "ingest", "list", "inspect", "delete", "relations", "subgraph", "database", "doctor"):
             assert name in result.output
         for alias in ("tenant", "memories", "recall", "knowledge", "fetch"):
             assert alias in result.output
@@ -353,6 +353,131 @@ class TestListInspectDeleteRelationsVerify:
             result = runner.invoke(app, ["relations", source_id], env=_WIDE)
         assert result.exit_code == 0
         assert any(f"/// Relations: {source_id}" in line for line in _lines(result))
+
+    def test_subgraph(self):
+        _auth()
+        w = _wrapper(
+            **{
+                "context.subgraph": {
+                    "seed_source_id": "src_1",
+                    "sources": [
+                        # discovered_via is the member it was reached FROM, not a mechanism.
+                        {
+                            "source_id": "reply_2",
+                            "title": "re: budget",
+                            "depth": 1,
+                            "discovered_via": "src_1",
+                            "discovered_relation": "same_thread",
+                            "app_provider": "slack",
+                        },
+                        {"source_id": "src_1", "title": "Q3 budget", "depth": 0},
+                    ],
+                    "relations": [{}],
+                    "auxiliary_relations": [{}, {}],
+                    "is_truncated": False,
+                    "auxiliary_truncated": False,
+                    "max_depth_reached": 1,
+                    "success": True,
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "src_1", "--depth", "2", "--max-sources", "50"], env=_WIDE)
+        assert result.exit_code == 0, result.output
+        assert "2 items connected through 1 hop" in result.output
+        assert "reply_2" in result.output and "re: budget" in result.output
+        assert "same_thread ← src_1" in result.output
+        assert "Reached by" in result.output
+        assert any("/// Subgraph: src_1" in line for line in _lines(result))
+        kw = w.context.subgraph.call_args.kwargs
+        assert kw["id"] == "src_1" and kw["depth"] == 2 and kw["max_sources"] == 50
+
+    def test_subgraph_json_is_the_payload(self):
+        _auth()
+        payload = {"seed_source_id": "src_1", "sources": [{"source_id": "src_1", "depth": 0}], "success": True}
+        w = _wrapper(**{"context.subgraph": payload})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["--output", "json", "subgraph", "src_1"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == payload
+
+    def test_subgraph_unknown_id_is_an_answer(self):
+        _auth()
+        w = _wrapper(**{"context.subgraph": {"seed_source_id": "nope", "sources": [], "success": True}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "nope"])
+        assert result.exit_code == 0
+        assert "no subgraph" in result.output.lower()
+
+    def test_subgraph_reports_truncation(self):
+        _auth()
+        w = _wrapper(
+            **{
+                "context.subgraph": {
+                    "sources": [{"source_id": "a", "depth": 0}, {"source_id": "b", "depth": 1}],
+                    "is_truncated": True,
+                    "max_depth_reached": 3,
+                    "success": True,
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "a"], env=_WIDE)
+        assert result.exit_code == 0
+        assert "clipped" in result.output
+
+    def test_subgraph_clipped_single_member_is_not_isolated(self):
+        """One member plus is_truncated is where the traversal stopped, not proof
+        that the item is unconnected. Saying "stands alone" there is a wrong
+        answer: --max-sources 1 would report every connected item as isolated."""
+        _auth()
+        w = _wrapper(
+            **{
+                "context.subgraph": {
+                    "sources": [{"source_id": "a", "depth": 0}],
+                    "is_truncated": True,
+                    "max_depth_reached": 0,
+                    "success": True,
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "a", "--max-sources", "1"], env=_WIDE)
+        assert result.exit_code == 0, result.output
+        assert "stands alone" not in result.output
+        assert "clipped" in result.output
+        assert "1 item connected" in result.output
+
+    def test_subgraph_metadata_is_shown_not_parsed_as_markup(self):
+        """Rich reads [square brackets] as style tags. A title like "[draft] Q3"
+        would be styled away, so the reader would never see it."""
+        _auth()
+        w = _wrapper(
+            **{
+                "context.subgraph": {
+                    "sources": [
+                        {"source_id": "a", "title": "[draft] Q3 plan", "depth": 0},
+                        {"source_id": "b", "title": "plain", "depth": 1},
+                    ],
+                    "is_truncated": False,
+                    "max_depth_reached": 1,
+                    "success": True,
+                }
+            }
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "a"], env=_WIDE)
+        assert result.exit_code == 0, result.output
+        assert "[draft]" in result.output
+
+    def test_subgraph_validates_depth_before_the_network(self):
+        _auth()
+        w = _wrapper()
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["subgraph", "a", "--depth", "0"])
+        assert result.exit_code != 0
+        assert "depth" in result.output
+        w.context.subgraph.assert_not_called()
 
     def test_verify(self):
         _auth()

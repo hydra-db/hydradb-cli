@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 from rich.console import Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -549,6 +550,96 @@ def do_relations(
         return Panel(
             make_table("Subject", "Predicate", "Object", rows=rows),
             title=f"[bold cyan]/// Relations: {source_id}[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+
+    print_result(result, fmt)
+
+
+# ── connected subgraph ───────────────────────────────────────────────────────
+
+
+def do_subgraph(
+    source_id: str,
+    *,
+    kind: str | None = None,
+    depth: int | None = None,
+    max_sources: int | None = None,
+    tenant_id: str | None = None,
+    sub_tenant_id: str | None = None,
+) -> None:
+    if not source_id.strip():
+        print_error("Item ID cannot be empty.")
+    if kind and kind not in VALID_KINDS:
+        print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
+    if depth is not None and not 1 <= depth <= 10:
+        print_error(f"--depth must be between 1 and 10, got {depth}.")
+    if max_sources is not None and max_sources < 1:
+        print_error(f"--max-sources must be at least 1, got {max_sources}.")
+
+    tid = require_tenant_id(tenant_id)
+    stid = resolve_sub_tenant_id(sub_tenant_id)
+    wrapper = get_wrapper()
+
+    result = _execute(
+        "Traversing the connected subgraph...",
+        lambda: wrapper.context.subgraph(
+            id=source_id, kind=kind, depth=depth, max_sources=max_sources, database=tid, collection=stid
+        ),
+    )
+
+    def fmt(r: dict):
+        members = r.get("sources") or []
+        if not members:
+            # An unknown id is an answer, not an error: the server says so with
+            # an empty member list rather than a 404, and this says the same.
+            return f"[dim]No item '{escape(source_id)}' in this collection, so there is no subgraph to show.[/dim]"
+        hops = r.get("max_depth_reached") or 0
+
+        # discovered_relation is the MECHANISM (same_thread, parent, child, or
+        # a relates_to type); discovered_via is the member this one was
+        # reached FROM — another row's id, so the table is also a tree. The
+        # parent id is shortened here because it has its own row in full.
+        def short(i: str) -> str:
+            return i[:12] + "…" if len(i) > 14 else i
+
+        rows = []
+        for m in sorted(members, key=lambda m: (m.get("depth", 0), m.get("source_id", ""))):
+            d = m.get("depth", 0)
+            if d == 0:
+                reached = "start"
+            else:
+                reached = m.get("discovered_relation") or "linked"
+                if m.get("discovered_via"):
+                    reached += f" ← {short(m['discovered_via'])}"
+            what = " ".join(x for x in (m.get("app_provider"), m.get("app_kind")) if x)
+            rows.append(
+                [str(d), m.get("source_id", "?"), m.get("title") or m.get("app_external_id") or "", what, reached]
+            )
+        n = len(members)
+        # One member means "nothing links to this" only when the traversal ran
+        # to completion. Clipped at --max-sources, one row is just where we
+        # stopped looking, and calling a connected item isolated is a wrong
+        # answer rather than a terse one.
+        if n == 1 and not r.get("is_truncated"):
+            headline = f"{escape(source_id)} stands alone: nothing in the graph links to it yet."
+        else:
+            headline = f"{n} item{'' if n == 1 else 's'} connected through {hops} hop{'' if hops == 1 else 's'}"
+            if r.get("is_truncated"):
+                headline += "  [yellow](clipped at --max-sources; the subgraph continues)[/yellow]"
+        footer = (
+            f"{len(r.get('relations') or [])} relation(s) among them · "
+            f"{len(r.get('auxiliary_relations') or [])} structural link(s) around them"
+            + ("  [yellow](structural links clipped)[/yellow]" if r.get("auxiliary_truncated") else "")
+        )
+        table = make_table("Depth", "Item", "Title", "Kind", "Reached by", rows=rows)
+        # Title on a Panel, not on the Table, for the same reason as
+        # `relations`: a table title wraps to the table's width and breaks an
+        # ordinary id mid-token.
+        return Panel(
+            Group(headline, table, footer),
+            title=f"[bold cyan]/// Subgraph: {escape(source_id)}[/bold cyan]",
             border_style="cyan",
             padding=(0, 1),
         )

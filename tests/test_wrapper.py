@@ -275,6 +275,62 @@ class TestConnectors:
             finally:
                 httpx.get = original
 
+    def test_subgraph_takes_the_raw_path_with_an_escaped_id(self):
+        """No SDK resource for /context/{id}/subgraph yet (CONTRACT §2 rule 7)."""
+        seen = {}
+
+        def handler(request: httpx.Request):
+            seen["url"] = str(request.url)
+            seen["headers"] = dict(request.headers)
+            return httpx.Response(
+                200, json={"success": True, "data": {"seed_source_id": "a b", "sources": []}, "meta": {}}
+            )
+
+        w = _wrapper_with_response({}, captured={})
+        transport = httpx.MockTransport(handler)
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                out = w.context.subgraph(
+                    id="a b", kind="memory", depth=2, max_sources=10, database="db1", collection="c1"
+                )
+            finally:
+                httpx.get = original
+        assert out == {"seed_source_id": "a b", "sources": []}, "envelope unwrapped by shape"
+        # Escaped as a path segment, with the scope and knobs as query params.
+        assert "/context/a%20b/subgraph?" in seen["url"]
+        for frag in ("database=db1", "collection=c1", "type=memory", "depth=2", "max_sources=10"):
+            assert frag in seen["url"], seen["url"]
+        assert seen["headers"]["api-version"] == "2"
+
+    def test_subgraph_error_becomes_a_client_error(self):
+        from hydradb_cli.hydra import HydraDBClientError
+
+        w = _wrapper_with_response({}, captured={})
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(400, json={"error": {"message": "depth must be a positive integer"}})
+        )
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                with pytest.raises(HydraDBClientError) as exc:
+                    w.context.subgraph(id="x", depth=99, database="db1")
+            finally:
+                httpx.get = original
+        assert exc.value.status_code == 400
+
     def test_provider_catalogue_error_becomes_a_client_error(self):
         transport = httpx.MockTransport(lambda request: httpx.Response(404, json={"message": "nope"}))
         w = HydraDB(token="x", base_url="http://test.local", database="db_test")
