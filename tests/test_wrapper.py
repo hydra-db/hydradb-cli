@@ -309,6 +309,35 @@ class TestConnectors:
             assert frag in seen["url"], seen["url"]
         assert seen["headers"]["api-version"] == "2"
 
+    def test_subgraph_forwards_acl_as_repeated_params(self):
+        """PRO-1684: the subgraph read is ACL-scoped, so principals travel too."""
+        seen: dict[str, list[str]] = {"urls": []}
+
+        def handler(request: httpx.Request):
+            seen["urls"].append(str(request.url))
+            return httpx.Response(
+                200, json={"success": True, "data": {"seed_source_id": "s1", "sources": []}, "meta": {}}
+            )
+
+        w = _wrapper_with_response({}, captured={})
+        transport = httpx.MockTransport(handler)
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                w.context.subgraph(id="s1", acl=["alice@corp.com", "bob@corp.com"], database="db1")
+                w.context.subgraph(id="s1", database="db1")
+            finally:
+                httpx.get = original
+        assert len(seen["urls"]) == 2
+        assert "acl=alice%40corp.com" in seen["urls"][0] and "acl=bob%40corp.com" in seen["urls"][0], seen["urls"][0]
+        assert "acl" not in seen["urls"][1], seen["urls"][1]
+
     def test_subgraph_error_becomes_a_client_error(self):
         from hydradb_cli.hydra import HydraDBClientError
 

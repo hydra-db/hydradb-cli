@@ -566,6 +566,7 @@ def do_subgraph(
     kind: str | None = None,
     depth: int | None = None,
     max_sources: int | None = None,
+    acl: list[str] | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
@@ -585,7 +586,7 @@ def do_subgraph(
     result = _execute(
         "Traversing the connected subgraph...",
         lambda: wrapper.context.subgraph(
-            id=source_id, kind=kind, depth=depth, max_sources=max_sources, database=tid, collection=stid
+            id=source_id, kind=kind, depth=depth, max_sources=max_sources, acl=acl, database=tid, collection=stid
         ),
     )
 

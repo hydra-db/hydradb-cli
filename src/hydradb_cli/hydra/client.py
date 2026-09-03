@@ -396,6 +396,7 @@ class _Context(_Resource):
         kind: str | None = None,
         depth: int | None = None,
         max_sources: int | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -422,6 +423,12 @@ class _Context(_Resource):
             params["depth"] = depth
         if max_sources is not None:
             params["max_sources"] = max_sources
+        # Repeated params (httpx encodes a list value as ?acl=a&acl=b), which
+        # the API reads alongside the comma-separated form. Omit when unset:
+        # the API treats [] the same as absent, so sending nothing keeps the
+        # request faithful to what the caller said.
+        if acl:
+            params["acl"] = list(acl)
         # The id is a path segment: escape it, or an id with a slash walks the
         # request to a different route.
         return self._w._raw_get(f"/context/{quote(id, safe='')}/subgraph", params=params)
