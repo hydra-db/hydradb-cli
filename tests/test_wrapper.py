@@ -6,6 +6,7 @@ tests for envelope unwrapping and error translation.
 """
 
 import json
+import types
 
 import httpx
 import pytest
@@ -16,7 +17,7 @@ from hydra_db.errors.not_found_error import NotFoundError
 from hydra_db.types.handler_error_response import HandlerErrorResponse
 
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
-from hydradb_cli.hydra.client import _bool_str, _is_envelope, _unwrap
+from hydradb_cli.hydra.client import _bool_str, _Connectors, _is_envelope, _unwrap
 
 
 def _multipart_fields(request: httpx.Request) -> dict:
@@ -347,3 +348,102 @@ class TestConnectors:
             finally:
                 httpx.get = original
         assert exc.value.status_code == 404
+
+
+class TestACL:
+    """PRO-1684: the caller declares the principals to answer as, and every
+    read that the API scopes by ACL must carry them to the wire.
+
+    The API treats an EMPTY acl exactly like an absent one (verified against
+    staging: `acl: []` and no acl both returned 134 sources in a database where
+    an unknown principal returned 130). [] is therefore not a way to ask for
+    "nobody" — the design doc's rule is that absent and [] alike mean
+    unrestricted, with __private__ as the marker that admits nobody.
+
+    The wrapper still sends no key at all when the caller passed no --acl, so
+    the request says what the caller said rather than leaning on that
+    equivalence holding forever.
+    """
+
+    def test_query_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({"chunks": []}, captured=captured)
+        w.context.query(query="q", acl=["alice@corp.com", "group:google:eng@corp.com"])
+        body = json.loads(captured["request"].content)
+        assert body["acl"] == ["alice@corp.com", "group:google:eng@corp.com"]
+
+    def test_query_without_acl_omits_the_field_entirely(self):
+        captured = {}
+        w = _wrapper_with_response({"chunks": []}, captured=captured)
+        w.context.query(query="q")
+        body = json.loads(captured["request"].content)
+        assert "acl" not in body, "an omitted acl must be absent from the request, not []"
+
+    def test_list_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({"sources": []}, captured=captured)
+        w.context.list(acl=["bob@corp.com"])
+        body = json.loads(captured["request"].content)
+        assert body["acl"] == ["bob@corp.com"]
+
+    def test_inspect_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({}, captured=captured)
+        w.context.inspect(id="s1", acl=["carol@corp.com"])
+        req = captured["request"]
+        assert "carol%40corp.com" in str(req.url) or "carol@corp.com" in str(req.url)
+
+    def test_relations_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({"relations": []}, captured=captured)
+        w.context.relations(id="s1", acl=["dan@corp.com"])
+        req = captured["request"]
+        assert "dan%40corp.com" in str(req.url) or "dan@corp.com" in str(req.url)
+
+
+class TestRotateCredentialsSdkRename:
+    """The rotate method's SDK name is generated from the endpoint summary and
+    changed between 2.1.2 (`..._refresh_token`) and 2.1.4 (`..._internal_use_only`).
+    The wrapper resolves whichever spelling the installed SDK ships, so the CLI
+    is not pinned to one release."""
+
+    @staticmethod
+    def _wrapper_with_sdk_connectors(obj):
+        from unittest.mock import MagicMock
+
+        w = MagicMock()
+        w._sdk = types.SimpleNamespace(connectors=obj)
+        return _Connectors(w)
+
+    def test_uses_the_new_spelling_when_present(self):
+        seen = {}
+
+        class NewOnly:
+            def rotate_a_connectors_stored_o_auth_refresh_token_internal_use_only(self, cid, request=None):
+                seen["called"] = ("new", cid, request)
+                return {}
+
+        self._wrapper_with_sdk_connectors(NewOnly()).rotate_credentials("c1", credentials={"access_token": "x"})
+        assert seen["called"] == ("new", "c1", {"access_token": "x"})
+
+    def test_falls_back_to_the_older_spelling(self):
+        seen = {}
+
+        class OldOnly:
+            def rotate_a_connectors_stored_o_auth_refresh_token(self, cid, request=None):
+                seen["called"] = ("old", cid, request)
+                return {}
+
+        self._wrapper_with_sdk_connectors(OldOnly()).rotate_credentials("c1", credentials={"access_token": "x"})
+        assert seen["called"] == ("old", "c1", {"access_token": "x"})
+
+    def test_unknown_spelling_raises_a_named_error(self):
+        class Empty:
+            pass
+
+        try:
+            self._wrapper_with_sdk_connectors(Empty()).rotate_credentials("c1", credentials={})
+        except AttributeError as e:
+            assert "no known credential-rotation method" in str(e)
+        else:
+            raise AssertionError("expected AttributeError naming the tried spellings")

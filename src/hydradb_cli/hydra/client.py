@@ -173,6 +173,7 @@ class _Context(_Resource):
         graph_context: bool | None = None,
         additional_context: str | None = None,
         query_by: str | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -192,6 +193,7 @@ class _Context(_Resource):
             graph_context=graph_context,
             additional_context=additional_context,
             query_by=query_by,
+            acl=acl,
             database=self._w._require_database(database),
             collection=self._w._resolve_collection(collection),
         )
@@ -299,6 +301,7 @@ class _Context(_Resource):
         page: int | None = None,
         page_size: int | None = None,
         ids: list[str] | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -310,6 +313,7 @@ class _Context(_Resource):
             page=page,
             page_size=page_size,
             ids=ids,
+            acl=acl,
         )
         data = _unwrap(resp)
         # The v2 list payload nests the real fields under `inner`; flatten it so
@@ -328,6 +332,7 @@ class _Context(_Resource):
         id: str,
         mode: str | None = None,
         expiry_seconds: int | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -340,6 +345,7 @@ class _Context(_Resource):
             collection=self._w._resolve_collection(collection),
             mode=mode,
             expiry_seconds=expiry_seconds,
+            acl=acl,
         )
         return _unwrap(resp)
 
@@ -367,6 +373,7 @@ class _Context(_Resource):
         kind: str | None = None,
         limit: int | None = None,
         cursor: float | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -378,6 +385,7 @@ class _Context(_Resource):
             type=kind,
             limit=limit,
             cursor=cursor,
+            acl=acl,
         )
         return _unwrap(resp)
 
@@ -692,19 +700,29 @@ class _Connectors(_Resource):
         resp = self._invoke(self._w._sdk.connectors.sync, connector_id)
         return _unwrap(resp)
 
-    def rotate_credentials(self, connector_id: str, *, credentials: dict) -> dict:
-        """Replace a connector's stored credentials.
+    # The SDK generates this method's name from the endpoint's summary text, so
+    # it moves whenever the summary is reworded: 2.1.2 called it
+    # ``rotate_a_connectors_stored_o_auth_refresh_token`` and 2.1.4 appends
+    # ``_internal_use_only``. Absorbing that churn is what this wrapper is for
+    # (CONTRACT S2), so the candidates live here, newest spelling first, rather
+    # than pinning the CLI to one SDK release.
+    _ROTATE_SDK_NAMES = (
+        "rotate_a_connectors_stored_o_auth_refresh_token_internal_use_only",
+        "rotate_a_connectors_stored_o_auth_refresh_token",
+    )
 
-        The SDK spells this ``rotate_a_connectors_stored_o_auth_refresh_token``.
-        That name is generated from summary text and is precisely the kind of
-        churn the wrapper exists to absorb, so it is confined to this one line.
-        """
-        resp = self._invoke(
-            self._w._sdk.connectors.rotate_a_connectors_stored_o_auth_refresh_token,
-            connector_id,
-            request=credentials,
+    def rotate_credentials(self, connector_id: str, *, credentials: dict) -> dict:
+        """Replace a connector's stored credentials."""
+        for name in self._ROTATE_SDK_NAMES:
+            fn = getattr(self._w._sdk.connectors, name, None)
+            if fn is not None:
+                resp = self._invoke(fn, connector_id, request=credentials)
+                return _unwrap(resp)
+        # A rename we have not seen. Say so plainly instead of failing with a
+        # bare AttributeError from somewhere inside the generated client.
+        raise AttributeError(
+            "hydradb-sdk exposes no known credential-rotation method; tried: " + ", ".join(self._ROTATE_SDK_NAMES)
         )
-        return _unwrap(resp)
 
 
 class HydraDB:
