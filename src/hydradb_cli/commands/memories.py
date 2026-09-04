@@ -44,10 +44,19 @@ def add(
 def list_memories(
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
+    acl: list[str] | None = typer.Option(
+        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+    ),
 ) -> None:
     """[dim](deprecated)[/dim] List memories — use 'hydradb list --kind memory'."""
     warn_deprecated("memories list", "list --kind memory")
-    _impl.do_list(kind="memory", tenant_id=tenant_id, sub_tenant_id=sub_tenant_id, spinner_msg="Fetching memories...")
+    _impl.do_list(
+        kind="memory",
+        acl=list(acl) if acl else None,
+        tenant_id=tenant_id,
+        sub_tenant_id=sub_tenant_id,
+        spinner_msg="Fetching memories...",
+    )
 
 
 @app.command()

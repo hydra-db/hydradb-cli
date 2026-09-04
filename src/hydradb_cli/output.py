@@ -12,6 +12,7 @@ from typing import Any
 
 import typer
 from rich.console import Console, RenderableType
+from rich.markup import escape
 from rich.table import Table
 from rich.theme import Theme
 
@@ -145,7 +146,14 @@ def make_table(
     title: str | None = None,
     border_style: str = "dim",
 ) -> Table:
-    """Build a Rich Table without printing it — callers compose into panels etc."""
+    """Build a Rich Table without printing it — callers compose into panels etc.
+
+    Cells are escaped, never parsed as markup. Every row this builds is API
+    data — ids, titles, provider names, Cypher results — and a title like
+    "[draft] Q3 plan" would otherwise be read as a style tag and vanish from
+    the output. Callers that want styled text use a Panel or a plain string;
+    `make_kv_table` deliberately keeps markup, and its callers rely on it.
+    """
     table = Table(
         show_header=True,
         header_style="bold cyan",
@@ -158,7 +166,7 @@ def make_table(
     for col in columns:
         table.add_column(col)
     for row in rows:
-        table.add_row(*[str(c) for c in row])
+        table.add_row(*[escape(str(c)) for c in row])
     return table
 
 

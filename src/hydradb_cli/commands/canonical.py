@@ -61,6 +61,11 @@ def query(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -78,6 +83,7 @@ def query(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
+        acl=list(acl) if acl else None,
         tenant_id=tid,
         sub_tenant_id=stid,
     )
@@ -148,6 +154,11 @@ def list_items(
     ),
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -155,12 +166,19 @@ def list_items(
 ) -> None:
     """List ingested sources and memories."""
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_list(kind=kind, page=page, page_size=page_size, tenant_id=tid, sub_tenant_id=stid)
+    _impl.do_list(
+        kind=kind, page=page, page_size=page_size, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
+    )
 
 
 def inspect(
     source_id: str = typer.Argument(help="Source ID to inspect."),
     mode: str = typer.Option("content", "--mode", help="Fetch mode: 'content', 'url', or 'both'."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -168,7 +186,7 @@ def inspect(
 ) -> None:
     """Inspect a source's content by its ID."""
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_inspect(source_id, mode=mode, tenant_id=tid, sub_tenant_id=stid)
+    _impl.do_inspect(source_id, mode=mode, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid)
 
 
 def delete(
@@ -200,6 +218,11 @@ def relations(
         None, "--kind", help="Corpus: 'memory' or 'knowledge' (split database); omit on a unified one."
     ),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -207,7 +230,37 @@ def relations(
 ) -> None:
     """Fetch knowledge-graph relations for a source."""
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_relations(source_id, kind=kind, limit=limit, tenant_id=tid, sub_tenant_id=stid)
+    _impl.do_relations(
+        source_id, kind=kind, limit=limit, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
+    )
+
+
+def subgraph(
+    source_id: str = typer.Argument(help="Item ID to start from (from 'hydradb query' or 'hydradb list')."),
+    kind: str | None = typer.Option(None, "--kind", help="Corpus: 'knowledge' (default) or 'memory'."),
+    depth: int | None = typer.Option(None, "--depth", help="Hops to traverse (1–10; server default 5)."),
+    max_sources: int | None = typer.Option(None, "--max-sources", help="Cap on members returned (server default 200)."),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). The subgraph contains only items those principals may see. Omit to search everything the API key can reach.",
+    ),
+    database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
+    collection: str | None = typer.Option(None, "--collection", help="Collection."),
+    tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
+    sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
+) -> None:
+    """Everything connected to one item: its thread, replies, parents, children, links."""
+    tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
+    _impl.do_subgraph(
+        source_id,
+        kind=kind,
+        depth=depth,
+        max_sources=max_sources,
+        acl=list(acl) if acl else None,
+        tenant_id=tid,
+        sub_tenant_id=stid,
+    )
 
 
 def verify(

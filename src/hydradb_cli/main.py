@@ -91,6 +91,9 @@ app.command(name="list", help="List ingested sources and memories.")(canonical.l
 app.command(name="inspect", help="Fetch a source's content by ID.")(canonical.inspect)
 app.command(name="delete", help="Delete memories or knowledge sources.")(canonical.delete)
 app.command(name="relations", help="Explore knowledge-graph relations.")(canonical.relations)
+app.command(name="subgraph", help="Everything connected to one item: thread, replies, hierarchy, links.")(
+    canonical.subgraph
+)
 app.command(name="verify", help="Check per-source ingestion status.")(canonical.verify)
 app.command(name="doctor", help="Check config and API reachability.")(canonical.doctor)
 app.add_typer(canonical.database_app, name="database", help="[bold]Database[/bold] management.")

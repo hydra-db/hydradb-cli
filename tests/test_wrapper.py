@@ -6,6 +6,7 @@ tests for envelope unwrapping and error translation.
 """
 
 import json
+import types
 
 import httpx
 import pytest
@@ -16,7 +17,7 @@ from hydra_db.errors.not_found_error import NotFoundError
 from hydra_db.types.handler_error_response import HandlerErrorResponse
 
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
-from hydradb_cli.hydra.client import _bool_str, _is_envelope, _unwrap
+from hydradb_cli.hydra.client import _bool_str, _Connectors, _is_envelope, _unwrap
 
 
 def _multipart_fields(request: httpx.Request) -> dict:
@@ -274,6 +275,91 @@ class TestConnectors:
             finally:
                 httpx.get = original
 
+    def test_subgraph_takes_the_raw_path_with_an_escaped_id(self):
+        """No SDK resource for /context/{id}/subgraph yet (CONTRACT §2 rule 7)."""
+        seen = {}
+
+        def handler(request: httpx.Request):
+            seen["url"] = str(request.url)
+            seen["headers"] = dict(request.headers)
+            return httpx.Response(
+                200, json={"success": True, "data": {"seed_source_id": "a b", "sources": []}, "meta": {}}
+            )
+
+        w = _wrapper_with_response({}, captured={})
+        transport = httpx.MockTransport(handler)
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                out = w.context.subgraph(
+                    id="a b", kind="memory", depth=2, max_sources=10, database="db1", collection="c1"
+                )
+            finally:
+                httpx.get = original
+        assert out == {"seed_source_id": "a b", "sources": []}, "envelope unwrapped by shape"
+        # Escaped as a path segment, with the scope and knobs as query params.
+        assert "/context/a%20b/subgraph?" in seen["url"]
+        for frag in ("database=db1", "collection=c1", "type=memory", "depth=2", "max_sources=10"):
+            assert frag in seen["url"], seen["url"]
+        assert seen["headers"]["api-version"] == "2"
+
+    def test_subgraph_forwards_acl_as_repeated_params(self):
+        """PRO-1684: the subgraph read is ACL-scoped, so principals travel too."""
+        seen: dict[str, list[str]] = {"urls": []}
+
+        def handler(request: httpx.Request):
+            seen["urls"].append(str(request.url))
+            return httpx.Response(
+                200, json={"success": True, "data": {"seed_source_id": "s1", "sources": []}, "meta": {}}
+            )
+
+        w = _wrapper_with_response({}, captured={})
+        transport = httpx.MockTransport(handler)
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                w.context.subgraph(id="s1", acl=["alice@corp.com", "bob@corp.com"], database="db1")
+                w.context.subgraph(id="s1", database="db1")
+            finally:
+                httpx.get = original
+        assert len(seen["urls"]) == 2
+        assert "acl=alice%40corp.com" in seen["urls"][0] and "acl=bob%40corp.com" in seen["urls"][0], seen["urls"][0]
+        assert "acl" not in seen["urls"][1], seen["urls"][1]
+
+    def test_subgraph_error_becomes_a_client_error(self):
+        from hydradb_cli.hydra import HydraDBClientError
+
+        w = _wrapper_with_response({}, captured={})
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(400, json={"error": {"message": "depth must be a positive integer"}})
+        )
+        with httpx.Client(transport=transport) as client:
+            original = httpx.get
+
+            def fake_get(url, **kwargs):
+                kwargs.pop("timeout", None)
+                return client.get(url, **kwargs)
+
+            httpx.get = fake_get
+            try:
+                with pytest.raises(HydraDBClientError) as exc:
+                    w.context.subgraph(id="x", depth=99, database="db1")
+            finally:
+                httpx.get = original
+        assert exc.value.status_code == 400
+
     def test_provider_catalogue_error_becomes_a_client_error(self):
         transport = httpx.MockTransport(lambda request: httpx.Response(404, json={"message": "nope"}))
         w = HydraDB(token="x", base_url="http://test.local", database="db_test")
@@ -291,3 +377,102 @@ class TestConnectors:
             finally:
                 httpx.get = original
         assert exc.value.status_code == 404
+
+
+class TestACL:
+    """PRO-1684: the caller declares the principals to answer as, and every
+    read that the API scopes by ACL must carry them to the wire.
+
+    The API treats an EMPTY acl exactly like an absent one (verified against
+    staging: `acl: []` and no acl both returned 134 sources in a database where
+    an unknown principal returned 130). [] is therefore not a way to ask for
+    "nobody" — the design doc's rule is that absent and [] alike mean
+    unrestricted, with __private__ as the marker that admits nobody.
+
+    The wrapper still sends no key at all when the caller passed no --acl, so
+    the request says what the caller said rather than leaning on that
+    equivalence holding forever.
+    """
+
+    def test_query_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({"chunks": []}, captured=captured)
+        w.context.query(query="q", acl=["alice@corp.com", "group:google:eng@corp.com"])
+        body = json.loads(captured["request"].content)
+        assert body["acl"] == ["alice@corp.com", "group:google:eng@corp.com"]
+
+    def test_query_without_acl_omits_the_field_entirely(self):
+        captured = {}
+        w = _wrapper_with_response({"chunks": []}, captured=captured)
+        w.context.query(query="q")
+        body = json.loads(captured["request"].content)
+        assert "acl" not in body, "an omitted acl must be absent from the request, not []"
+
+    def test_list_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({"sources": []}, captured=captured)
+        w.context.list(acl=["bob@corp.com"])
+        body = json.loads(captured["request"].content)
+        assert body["acl"] == ["bob@corp.com"]
+
+    def test_inspect_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({}, captured=captured)
+        w.context.inspect(id="s1", acl=["carol@corp.com"])
+        req = captured["request"]
+        assert "carol%40corp.com" in str(req.url) or "carol@corp.com" in str(req.url)
+
+    def test_relations_sends_acl_principals(self):
+        captured = {}
+        w = _wrapper_with_response({"relations": []}, captured=captured)
+        w.context.relations(id="s1", acl=["dan@corp.com"])
+        req = captured["request"]
+        assert "dan%40corp.com" in str(req.url) or "dan@corp.com" in str(req.url)
+
+
+class TestRotateCredentialsSdkRename:
+    """The rotate method's SDK name is generated from the endpoint summary and
+    changed between 2.1.2 (`..._refresh_token`) and 2.1.4 (`..._internal_use_only`).
+    The wrapper resolves whichever spelling the installed SDK ships, so the CLI
+    is not pinned to one release."""
+
+    @staticmethod
+    def _wrapper_with_sdk_connectors(obj):
+        from unittest.mock import MagicMock
+
+        w = MagicMock()
+        w._sdk = types.SimpleNamespace(connectors=obj)
+        return _Connectors(w)
+
+    def test_uses_the_new_spelling_when_present(self):
+        seen = {}
+
+        class NewOnly:
+            def rotate_a_connectors_stored_o_auth_refresh_token_internal_use_only(self, cid, request=None):
+                seen["called"] = ("new", cid, request)
+                return {}
+
+        self._wrapper_with_sdk_connectors(NewOnly()).rotate_credentials("c1", credentials={"access_token": "x"})
+        assert seen["called"] == ("new", "c1", {"access_token": "x"})
+
+    def test_falls_back_to_the_older_spelling(self):
+        seen = {}
+
+        class OldOnly:
+            def rotate_a_connectors_stored_o_auth_refresh_token(self, cid, request=None):
+                seen["called"] = ("old", cid, request)
+                return {}
+
+        self._wrapper_with_sdk_connectors(OldOnly()).rotate_credentials("c1", credentials={"access_token": "x"})
+        assert seen["called"] == ("old", "c1", {"access_token": "x"})
+
+    def test_unknown_spelling_raises_a_named_error(self):
+        class Empty:
+            pass
+
+        try:
+            self._wrapper_with_sdk_connectors(Empty()).rotate_credentials("c1", credentials={})
+        except AttributeError as e:
+            assert "no known credential-rotation method" in str(e)
+        else:
+            raise AssertionError("expected AttributeError naming the tried spellings")

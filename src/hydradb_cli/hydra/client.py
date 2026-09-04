@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from hydra_db import HydraDB as _SdkHydraDB
@@ -261,6 +262,7 @@ class _Context(_Resource):
         graph_context: bool | None = None,
         additional_context: str | None = None,
         query_by: str | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -280,6 +282,7 @@ class _Context(_Resource):
             graph_context=graph_context,
             additional_context=additional_context,
             query_by=query_by,
+            acl=acl,
             database=self._w._require_database(database),
             collection=self._w._resolve_collection(collection),
         )
@@ -425,6 +428,7 @@ class _Context(_Resource):
         page: int | None = None,
         page_size: int | None = None,
         ids: list[str] | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -436,6 +440,7 @@ class _Context(_Resource):
             page=page,
             page_size=page_size,
             ids=ids,
+            acl=acl,
         )
         data = _unwrap(resp)
         # The v2 list payload nests the real fields under `inner`; flatten it so
@@ -454,6 +459,7 @@ class _Context(_Resource):
         id: str,
         mode: str | None = None,
         expiry_seconds: int | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -466,6 +472,7 @@ class _Context(_Resource):
             collection=self._w._resolve_collection(collection),
             mode=mode,
             expiry_seconds=expiry_seconds,
+            acl=acl,
         )
         return _unwrap(resp)
 
@@ -493,6 +500,7 @@ class _Context(_Resource):
         kind: str | None = None,
         limit: int | None = None,
         cursor: float | None = None,
+        acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
     ) -> dict:
@@ -504,8 +512,53 @@ class _Context(_Resource):
             type=kind,
             limit=limit,
             cursor=cursor,
+            acl=acl,
         )
         return _unwrap(resp)
+
+    def subgraph(
+        self,
+        *,
+        id: str,
+        kind: str | None = None,
+        depth: int | None = None,
+        max_sources: int | None = None,
+        acl: list[str] | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> dict:
+        """The connected subgraph of one item (``GET /context/{id}/subgraph``).
+
+        Every item reachable from ``id`` through item-level relations — explicit
+        links declared at ingest, a shared thread, parent/child hierarchy — plus
+        the relations among the members and the structural graph around them.
+
+        No SDK resource for this yet (CONTRACT §2 rule 7), so it takes the raw
+        path behind the same surface: same headers, same envelope unwrap, same
+        :class:`HydraDBClientError`. When the SDK grows ``context.subgraph``,
+        only this method changes.
+        """
+        params: dict[str, Any] = {
+            "database": self._w._require_database(database),
+        }
+        col = self._w._resolve_collection(collection)
+        if col:
+            params["collection"] = col
+        if kind:
+            params["type"] = kind
+        if depth is not None:
+            params["depth"] = depth
+        if max_sources is not None:
+            params["max_sources"] = max_sources
+        # Repeated params (httpx encodes a list value as ?acl=a&acl=b), which
+        # the API reads alongside the comma-separated form. Omit when unset:
+        # the API treats [] the same as absent, so sending nothing keeps the
+        # request faithful to what the caller said.
+        if acl:
+            params["acl"] = list(acl)
+        # The id is a path segment: escape it, or an id with a slash walks the
+        # request to a different route.
+        return self._w._raw_get(f"/context/{quote(id, safe='')}/subgraph", params=params)
 
     def ingestion_status(
         self,
@@ -752,19 +805,29 @@ class _Connectors(_Resource):
         resp = self._invoke(self._w._sdk.connectors.sync, connector_id)
         return _unwrap(resp)
 
-    def rotate_credentials(self, connector_id: str, *, credentials: dict) -> dict:
-        """Replace a connector's stored credentials.
+    # The SDK generates this method's name from the endpoint's summary text, so
+    # it moves whenever the summary is reworded: 2.1.2 called it
+    # ``rotate_a_connectors_stored_o_auth_refresh_token`` and 2.1.4 appends
+    # ``_internal_use_only``. Absorbing that churn is what this wrapper is for
+    # (CONTRACT S2), so the candidates live here, newest spelling first, rather
+    # than pinning the CLI to one SDK release.
+    _ROTATE_SDK_NAMES = (
+        "rotate_a_connectors_stored_o_auth_refresh_token_internal_use_only",
+        "rotate_a_connectors_stored_o_auth_refresh_token",
+    )
 
-        The SDK spells this ``rotate_a_connectors_stored_o_auth_refresh_token``.
-        That name is generated from summary text and is precisely the kind of
-        churn the wrapper exists to absorb, so it is confined to this one line.
-        """
-        resp = self._invoke(
-            self._w._sdk.connectors.rotate_a_connectors_stored_o_auth_refresh_token,
-            connector_id,
-            request=credentials,
+    def rotate_credentials(self, connector_id: str, *, credentials: dict) -> dict:
+        """Replace a connector's stored credentials."""
+        for name in self._ROTATE_SDK_NAMES:
+            fn = getattr(self._w._sdk.connectors, name, None)
+            if fn is not None:
+                resp = self._invoke(fn, connector_id, request=credentials)
+                return _unwrap(resp)
+        # A rename we have not seen. Say so plainly instead of failing with a
+        # bare AttributeError from somewhere inside the generated client.
+        raise AttributeError(
+            "hydradb-sdk exposes no known credential-rotation method; tried: " + ", ".join(self._ROTATE_SDK_NAMES)
         )
-        return _unwrap(resp)
 
 
 class HydraDB:
@@ -806,7 +869,8 @@ class HydraDB:
     def _raw_get(self, path: str, *, params: dict | None = None) -> Any:
         """GET an endpoint the SDK does not expose, with the same error contract.
 
-        Used only for ``/connectors/providers``. It sends the same auth and
+        Used for ``/connectors/providers`` and ``/context/{id}/subgraph``. It
+        sends the same auth and
         ``API-Version: 2`` headers the SDK does, unwraps the envelope by shape,
         and raises the same :class:`HydraDBClientError`, so a caller cannot tell
         it apart from an SDK call and ``handle_api_error`` works unchanged.

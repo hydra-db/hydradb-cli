@@ -15,7 +15,7 @@ Command-line interface for [HydraDB](https://hydradb.com) — manage memories, r
   - [Scope options](#scope-options)
   - [query](#query)
   - [ingest](#ingest)
-  - [list / inspect / relations / verify](#list--inspect--relations--verify)
+  - [list / inspect / relations / subgraph / verify](#list--inspect--relations--subgraph--verify)
   - [delete](#delete)
   - [database](#database)
   - [graph (Cypher / BYOG)](#graph-cypher--byog)
@@ -264,7 +264,7 @@ apply to file ingest and are rejected rather than silently ignored.
 
 ---
 
-### list / inspect / relations / verify
+### list / inspect / relations / subgraph / verify
 
 Browse and read back what you have stored.
 
@@ -273,6 +273,7 @@ Browse and read back what you have stored.
 | `list` | Lists ingested sources and memories | `--kind`, `--page`, `--page-size` |
 | `inspect <id>` | Fetches a source's content or a presigned download URL | `--mode` (`content`, `url`, `both`) |
 | `relations <id>` | Knowledge graph triplets linked to a source | `--kind`, `--limit` |
+| `subgraph <id>` | Everything connected to one item — its thread, replies, parents, children, links — traversed breadth-first | `--kind`, `--depth`, `--max-sources` |
 | `verify <ids...>` | Checks indexing progress of uploaded sources | — |
 
 ```bash
@@ -281,6 +282,9 @@ hydradb list --kind knowledge --page-size 10
 hydradb inspect source_abc123
 hydradb inspect source_abc123 --mode url
 hydradb relations source_abc123
+hydradb subgraph source_abc123
+hydradb subgraph source_abc123 --depth 2 --max-sources 50
+hydradb --output json subgraph source_abc123 | jq '.sources[].source_id'
 hydradb verify source_abc123
 ```
 
