@@ -225,17 +225,6 @@ def do_ingest_memory(
     # ``--kind unified`` against a split database quietly became ``memory``.
     kind = _resolve_kind(wrapper, tid, kind, "memory")
 
-    if kind == "unified":
-        # A unified item is text or a conversation, and this path sends text —
-        # so neither of these has anywhere to go. Refused rather than dropped,
-        # the same way file ingest refuses the options it cannot honour.
-        unsupported = [flag for flag, given in (("--markdown", markdown), ("--user-name", user_name)) if given]
-        if unsupported:
-            print_error(
-                f"Database '{tid}' is unified: {'/'.join(unsupported)} do not apply there. "
-                "A unified item is text or a conversation, so drop them and run the ingest again."
-            )
-
     result = _execute(
         "Adding memory...",
         lambda: wrapper.context.ingest(

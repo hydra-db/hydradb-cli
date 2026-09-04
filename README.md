@@ -246,9 +246,9 @@ file arguments are always knowledge sources.
 | `--text` / `-t` | Text to ingest. Use `-` to read from stdin |
 | `--title` | Optional title |
 | `--source-id` | Client-assigned source identifier |
-| `--user-name` | User name (memory only; refused on a unified database) |
+| `--user-name` | Speaker identity (not accepted on knowledge) |
 | `--infer` / `--no-infer` | Extract insights and build the knowledge graph (default on) |
-| `--markdown` | Treat text as markdown (memory only; refused on a unified database) |
+| `--markdown` | Treat text as markdown (not accepted on knowledge) |
 | `--upsert` / `--no-upsert` | Update existing items with the same `source_id` (default on) |
 
 ```bash

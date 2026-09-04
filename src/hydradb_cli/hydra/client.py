@@ -404,6 +404,15 @@ class _Context(_Resource):
                 item["title"] = title
             if source_id:
                 item["context_id"] = source_id
+            # `is_markdown` and `user_name` are on IngestItem (PRO-1618), so they
+            # are carried rather than dropped. This path only ever sends a TEXT
+            # item, which is exactly the case the server fills `user_name` from:
+            # a conversation names its speaker per turn and that stays
+            # authoritative, but there are no turns here.
+            if is_markdown is not None:
+                item["is_markdown"] = bool(is_markdown)
+            if user_name:
+                item["user_name"] = user_name
             return self.ingest_items([item], upsert=upsert, database=database, collection=collection)
 
         memories: str | None = None

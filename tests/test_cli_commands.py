@@ -1139,18 +1139,21 @@ class TestUnifiedDatabases:
         assert "--kind must be one of" in result.output
         w.context.ingest.assert_not_called()
 
-    # A unified item is text or a conversation. --markdown has no counterpart at
-    # all and --user-name only exists on a conversation turn, so both were built
-    # into nothing while the caller was told "1 success, 0 failed".
-    def test_markdown_and_user_name_are_refused_on_a_unified_database(self):
+    # IngestItem carries is_markdown and user_name (PRO-1618), so both are
+    # forwarded on the unified path rather than being built into nothing while
+    # the caller is told "1 success, 0 failed".
+    def test_markdown_and_user_name_are_carried_on_a_unified_database(self):
         _auth()
-        for flag in (["--markdown"], ["--user-name", "ada"]):
-            w = _wrapper(**{"databases.layout": "unified"})
-            with _patch_wrapper(w):
-                result = runner.invoke(app, ["ingest", "--text", "a note", *flag])
-            assert result.exit_code != 0, result.output
-            assert flag[0] in result.output
-            w.context.ingest.assert_not_called()
+        w = _wrapper(
+            **{"context.ingest": {"success_count": 1, "failed_count": 0, "results": []}, "databases.layout": "unified"}
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note", "--markdown", "--user-name", "ada"])
+        assert result.exit_code == 0, result.output
+        kwargs = w.context.ingest.call_args.kwargs
+        assert kwargs["kind"] == "unified"
+        assert kwargs["is_markdown"] is True
+        assert kwargs["user_name"] == "ada"
 
     def test_markdown_and_user_name_still_work_on_a_split_database(self):
         _auth()
@@ -1247,6 +1250,28 @@ class TestUnifiedWrapper:
         body = kwargs["json"]
         assert body["database"] == "db1" and body["collection"] == "c1"
         assert body["items"] == [{"enrich": False, "text": "note", "title": "T", "context_id": "ctx-1"}]
+
+    def test_unified_item_carries_is_markdown_and_user_name(self, monkeypatch):
+        """Both are on IngestItem (PRO-1618), so they go on the wire.
+
+        This path only ever sends a text item, which is exactly the case the
+        server fills ``user_name`` from — a conversation names its speaker per
+        turn and that stays authoritative, but there are no turns here.
+        """
+        calls = self._capture(monkeypatch, {"success_count": 1})
+        w = self._wrapper()
+        w.context.ingest(kind="unified", text="note", user_name="ada", is_markdown=True)
+        item = calls[0][2]["json"]["items"][0]
+        assert item["is_markdown"] is True
+        assert item["user_name"] == "ada"
+
+    def test_unified_item_omits_what_the_caller_did_not_set(self, monkeypatch):
+        calls = self._capture(monkeypatch, {"success_count": 1})
+        w = self._wrapper()
+        w.context.ingest(kind="unified", text="note")
+        item = calls[0][2]["json"]["items"][0]
+        assert "user_name" not in item
+        assert "is_markdown" not in item
 
     def test_ingest_unified_refuses_files(self, monkeypatch):
         self._capture(monkeypatch, {})
