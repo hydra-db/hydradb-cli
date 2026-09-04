@@ -94,7 +94,7 @@ def ingest(
     kind: str | None = typer.Option(
         None,
         "--kind",
-        help="Kind to ingest: 'memory' (default) or 'knowledge'; on a unified database everything is 'unified'.",
+        help="Kind to ingest: 'memory' (default) or 'knowledge'; on a unified database leave it unset, or pass 'unified'.",
     ),
     text: str | None = typer.Option(None, "--text", "-t", help="Text to ingest. Use '-' to read from stdin."),
     title: str | None = typer.Option(None, "--title", help="Optional title."),
@@ -127,6 +127,7 @@ def ingest(
     if kind == "knowledge":
         _impl.do_ingest_knowledge_text(
             _resolve_text_input(text),
+            kind=kind,
             title=title,
             source_id=source_id,
             tenant_id=tid,
@@ -135,6 +136,7 @@ def ingest(
         return
     _impl.do_ingest_memory(
         _resolve_text_input(text),
+        kind=kind,
         title=title,
         source_id=source_id,
         user_name=user_name,

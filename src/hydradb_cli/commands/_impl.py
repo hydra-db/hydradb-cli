@@ -205,6 +205,7 @@ def _format_ingest_memory(r: dict, text: str):
 def do_ingest_memory(
     text: str,
     *,
+    kind: str | None = None,
     title: str | None = None,
     source_id: str | None = None,
     user_name: str | None = None,
@@ -214,14 +215,31 @@ def do_ingest_memory(
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
+    if kind and kind not in VALID_KINDS:
+        print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    # The user's ``--kind`` wins, exactly as it does on every other command.
+    # Passing ``None`` here discarded what they typed and re-derived it, so
+    # ``--kind unified`` against a split database quietly became ``memory``.
+    kind = _resolve_kind(wrapper, tid, kind, "memory")
+
+    if kind == "unified":
+        # A unified item is text or a conversation, and this path sends text —
+        # so neither of these has anywhere to go. Refused rather than dropped,
+        # the same way file ingest refuses the options it cannot honour.
+        unsupported = [flag for flag, given in (("--markdown", markdown), ("--user-name", user_name)) if given]
+        if unsupported:
+            print_error(
+                f"Database '{tid}' is unified: {'/'.join(unsupported)} do not apply there. "
+                "A unified item is text or a conversation, so drop them and run the ingest again."
+            )
 
     result = _execute(
         "Adding memory...",
         lambda: wrapper.context.ingest(
-            kind=_resolve_kind(wrapper, tid, None, "memory"),
+            kind=kind,
             text=text,
             title=title,
             source_id=source_id,
@@ -239,19 +257,24 @@ def do_ingest_memory(
 def do_ingest_knowledge_text(
     text: str,
     *,
+    kind: str | None = None,
     title: str | None = None,
     source_id: str | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
+    if kind and kind not in VALID_KINDS:
+        print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    # As above: the user's ``--kind`` is carried through, not re-derived.
+    kind = _resolve_kind(wrapper, tid, kind, "knowledge")
 
     result = _execute(
         "Uploading text...",
         lambda: wrapper.context.ingest(
-            kind=_resolve_kind(wrapper, tid, None, "knowledge"),
+            kind=kind,
             text=text,
             title=title,
             source_id=source_id,

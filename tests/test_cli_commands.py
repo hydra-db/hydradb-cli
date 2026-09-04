@@ -10,12 +10,15 @@ import json
 import re
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
 import hydradb_cli.config
 import hydradb_cli.output
+from hydradb_cli.commands._impl import _resolve_kind
 from hydradb_cli.config import save_config
+from hydradb_cli.hydra import HydraDBClientError
 from hydradb_cli.main import app
 
 runner = CliRunner()
@@ -1068,6 +1071,27 @@ class TestUnifiedDatabases:
         assert any("a" in line.split() and "unified" in line for line in lines), lines
         assert any("b" in line.split() and "split" in line for line in lines), lines
 
+    def test_database_list_json_emits_the_payload_as_the_server_sent_it(self):
+        """--output json is a machine contract; moving list() onto the raw path
+        must not have reshaped it.
+
+        The SDK model this used to go through declares extra="allow" and its
+        dump drops fields the server omitted, so both paths produce the same
+        dict. This pins that: every key the server sent, no key it did not.
+        """
+        _auth()
+        payload = {
+            "databases": ["a", "b"],
+            "tenant_ids": ["a", "b"],
+            "details": [{"database": "a", "type": "unified"}, {"database": "b", "type": "split"}],
+            "message": "ok",
+        }
+        w = _wrapper(**{"databases.list": payload})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["--output", "json", "database", "list"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == payload
+
     def test_query_defaults_to_unified_on_a_unified_database(self):
         _auth()
         w = _wrapper(**{"context.query": {"chunks": []}, "databases.layout": "unified"})
@@ -1092,6 +1116,52 @@ class TestUnifiedDatabases:
         # The server refuses it with a message naming the rule; the CLI must
         # not silently substitute a different kind than the one asked for.
         assert w.context.query.call_args.kwargs["kind"] == "memory"
+
+    def test_explicit_kind_is_never_overridden_on_ingest(self):
+        # ingest passed None in place of what the user typed and re-derived the
+        # kind from the layout, so --kind was the one flag the invariant above
+        # did not hold for.
+        _auth()
+        ingest = {"success_count": 1, "failed_count": 0, "results": []}
+        for layout, kind in (("unified", "memory"), ("split", "unified"), ("unified", "knowledge")):
+            w = _wrapper(**{"context.ingest": ingest, "databases.layout": layout})
+            with _patch_wrapper(w):
+                result = runner.invoke(app, ["ingest", "--text", "a note", "--kind", kind])
+            assert result.exit_code == 0, result.output
+            assert w.context.ingest.call_args.kwargs["kind"] == kind
+
+    def test_ingest_refuses_a_bad_kind(self):
+        _auth()
+        w = _wrapper(**{"databases.layout": "split"})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note", "--kind", "nonsense"])
+        assert result.exit_code != 0
+        assert "--kind must be one of" in result.output
+        w.context.ingest.assert_not_called()
+
+    # A unified item is text or a conversation. --markdown has no counterpart at
+    # all and --user-name only exists on a conversation turn, so both were built
+    # into nothing while the caller was told "1 success, 0 failed".
+    def test_markdown_and_user_name_are_refused_on_a_unified_database(self):
+        _auth()
+        for flag in (["--markdown"], ["--user-name", "ada"]):
+            w = _wrapper(**{"databases.layout": "unified"})
+            with _patch_wrapper(w):
+                result = runner.invoke(app, ["ingest", "--text", "a note", *flag])
+            assert result.exit_code != 0, result.output
+            assert flag[0] in result.output
+            w.context.ingest.assert_not_called()
+
+    def test_markdown_and_user_name_still_work_on_a_split_database(self):
+        _auth()
+        w = _wrapper(
+            **{"context.ingest": {"success_count": 1, "failed_count": 0, "results": []}, "databases.layout": "split"}
+        )
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note", "--markdown", "--user-name", "ada"])
+        assert result.exit_code == 0, result.output
+        assert w.context.ingest.call_args.kwargs["is_markdown"] is True
+        assert w.context.ingest.call_args.kwargs["user_name"] == "ada"
 
     def test_ingest_text_goes_unified(self):
         _auth()
@@ -1226,3 +1296,122 @@ class TestUnifiedWrapper:
         monkeypatch.setattr("hydradb_cli.hydra.client.httpx.request", boom)
         w = self._wrapper()
         assert w.databases.layout("a") == "split"
+
+    def test_a_probe_failure_downgrade_sends_the_split_kind_and_is_not_cached(self, monkeypatch):
+        """What follows the downgrade above, which the assertion alone does not say.
+
+        Reading split is the safe answer for a database created before PRO-1618,
+        but on a UNIFIED one it means the next call sends ``type=knowledge`` and
+        the server answers 400 — a failure the user did not cause. It must at
+        least not be remembered: once the probe recovers, the layout is right
+        again without restarting the process.
+        """
+        failing = True
+
+        class _Resp:
+            status_code = 200
+            is_error = False
+            content = b"x"
+
+            @staticmethod
+            def json():
+                return {
+                    "success": True,
+                    "data": {"databases": ["a"], "details": [{"database": "a", "type": "unified"}]},
+                }
+
+        def flaky(method, url, **kwargs):
+            if failing:
+                raise httpx.ConnectError("down")
+            return _Resp()
+
+        monkeypatch.setattr("hydradb_cli.hydra.client.httpx.request", flaky)
+        monkeypatch.setattr("hydradb_cli.hydra.client.time.sleep", lambda _s: None)
+        w = self._wrapper()
+
+        assert w.databases.layout("a") == "split"
+        # A downgrade sends the split default at a unified database, and the
+        # server refuses it. That is the cost of guessing, and it is why the
+        # guess must not stick.
+        assert _resolve_kind(w, "a", None, "knowledge") == "knowledge"
+
+        failing = False
+        assert w.databases.layout("a") == "unified", "a failed probe must not be memoised"
+        assert _resolve_kind(w, "a", None, "knowledge") == "unified"
+
+    # databases.list() moved onto this path, so it lost the SDK's retries: a
+    # single 502 failed `hydradb database list` outright, and made the layout
+    # probe read split on a unified database.
+    def test_the_raw_path_retries_retryable_statuses(self, monkeypatch):
+        for status in (429, 500, 502, 408, 409):
+            attempts = []
+
+            class _Resp:
+                def __init__(self, code):
+                    self.status_code = code
+                    self.is_error = code >= 400
+                    self.content = b"x"
+                    self.headers = {}
+
+                def json(self):
+                    return {"success": True, "data": {"databases": ["a"]}}
+
+            def flaky(method, url, _code=status, _seen=attempts, **kwargs):
+                _seen.append(_code)
+                return _Resp(200 if len(_seen) == 3 else _code)
+
+            monkeypatch.setattr("hydradb_cli.hydra.client.httpx.request", flaky)
+            monkeypatch.setattr("hydradb_cli.hydra.client.time.sleep", lambda _s: None)
+            assert self._wrapper().databases.list() == {"databases": ["a"]}
+            assert len(attempts) == 3, f"status {status} was not retried"
+
+    def test_the_raw_path_does_not_retry_a_4xx_and_gives_up_after_two(self, monkeypatch):
+        attempts = []
+
+        class _Resp:
+            status_code = 400
+            is_error = True
+            content = b"x"
+            headers: dict = {}
+
+            @staticmethod
+            def json():
+                return {"error": {"message": "no"}}
+
+        def refusing(method, url, **kwargs):
+            attempts.append(url)
+            return _Resp()
+
+        monkeypatch.setattr("hydradb_cli.hydra.client.httpx.request", refusing)
+        monkeypatch.setattr("hydradb_cli.hydra.client.time.sleep", lambda _s: None)
+        with pytest.raises(HydraDBClientError):
+            self._wrapper().databases.list()
+        assert len(attempts) == 1, "a 400 is the caller's fault; retrying it only wastes their time"
+
+        attempts.clear()
+        _Resp.status_code = 503
+        _Resp.is_error = True
+        with pytest.raises(HydraDBClientError):
+            self._wrapper().databases.list()
+        assert len(attempts) == 3, "two retries, matching the SDK"
+
+    def test_the_raw_path_waits_as_long_as_the_server_asked(self, monkeypatch):
+        waits = []
+
+        class _Resp:
+            status_code = 429
+            is_error = True
+            content = b"x"
+            headers = {"retry-after": "7"}
+
+            @staticmethod
+            def json():
+                return {"error": {"message": "slow down"}}
+
+        monkeypatch.setattr("hydradb_cli.hydra.client.httpx.request", lambda method, url, **kw: _Resp())
+        monkeypatch.setattr("hydradb_cli.hydra.client.time.sleep", waits.append)
+        with pytest.raises(HydraDBClientError):
+            self._wrapper().databases.list()
+        # Retry-After beats the backoff, and it is taken literally rather than
+        # jittered — the server named a number.
+        assert waits == [7.0, 7.0]

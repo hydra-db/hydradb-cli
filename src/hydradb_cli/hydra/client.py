@@ -17,7 +17,9 @@ Responsibilities (CONTRACT §2):
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
+from random import random
 from typing import Any
 from urllib.parse import quote
 
@@ -94,6 +96,63 @@ def _bool_str(value: bool | None) -> str | None:
 LAYOUT_SPLIT = "split"
 LAYOUT_UNIFIED = "unified"
 
+# Retry policy for the hand-rolled path below, matched to the pinned SDK's
+# (``hydra_db/core/http_client.py``): two retries, the same statuses, the same
+# 1s-doubling backoff with jitter, and the same preference for whatever the
+# server itself asked for.
+#
+# It is stated here rather than imported because those are the SDK's private
+# module functions and the wrapper is the firewall (CONTRACT S2). Matching the
+# policy matters because ``databases.list()`` moved onto this path: without it a
+# single 502 fails ``hydradb database list`` outright, and — worse — ``layouts()``
+# reads through the same call, so a transient blip makes the layout probe read
+# split and sends ``type=knowledge`` at a unified database, turning someone
+# else's flap into a 400 the user did not cause.
+_RAW_MAX_RETRIES = 2
+_RAW_INITIAL_RETRY_DELAY_SECONDS = 1.0
+_RAW_MAX_RETRY_DELAY_SECONDS = 60.0
+_RAW_JITTER_FACTOR = 0.2
+# 408 and 409 join the 5xx and 429 set because the SDK retries them too.
+_RAW_RETRY_STATUSES = frozenset({408, 409, 429})
+
+
+def _raw_should_retry(status: int) -> bool:
+    return status >= 500 or status in _RAW_RETRY_STATUSES
+
+
+def _raw_retry_after(headers: Any) -> float | None:
+    """The wait the server asked for, in seconds, or ``None`` if it asked for none.
+
+    The HTTP-date form of ``Retry-After`` is deliberately not parsed: it falls
+    through to the exponential backoff, which is a safe answer, where a
+    mis-parsed date is not.
+    """
+    raw_ms = headers.get("retry-after-ms")
+    if raw_ms is not None:
+        try:
+            return float(raw_ms) / 1000
+        except ValueError:
+            pass
+    raw_seconds = headers.get("retry-after")
+    if raw_seconds is not None:
+        try:
+            return float(raw_seconds)
+        except ValueError:
+            pass
+    return None
+
+
+def _raw_backoff(response: httpx.Response | None, attempt: int) -> float:
+    """Seconds to wait before attempt ``attempt + 1``."""
+    if response is not None:
+        asked = _raw_retry_after(response.headers)
+        if asked is not None and asked > 0:
+            return min(asked, _RAW_MAX_RETRY_DELAY_SECONDS)
+    backoff = min(_RAW_INITIAL_RETRY_DELAY_SECONDS * 2.0**attempt, _RAW_MAX_RETRY_DELAY_SECONDS)
+    # Symmetric jitter so a fleet of clients does not retry in lockstep. Not a
+    # security decision, so the stdlib generator is the right one.
+    return backoff * (1 + (random() - 0.5) * _RAW_JITTER_FACTOR)  # noqa: S311 - retry spacing, not a secret
+
 
 class _Resource:
     """Base for the ``databases``/``context`` sub-resources."""
@@ -131,7 +190,8 @@ class _Resource:
         PRO-1618 added ``type`` to ``POST /databases``, ``items`` to
         ``POST /context/ingest`` and ``details[]`` to ``GET /databases``; the
         generated client drops fields it does not know. Same headers, envelope
-        unwrap and error translation as the SDK path, so callers cannot tell.
+        unwrap, error translation AND retry policy as the SDK path, so callers
+        cannot tell which one they got.
         """
         url = f"{self._w._base_url.rstrip('/')}{path}"
         headers = {
@@ -140,27 +200,40 @@ class _Resource:
             # CONTRACT S2 rule 6: every v2 call names its version.
             "API-Version": "2",
         }
-        try:
-            response = httpx.request(
-                method,
-                url,
-                headers=headers,
-                json=json_body,
-                params=params,
-                timeout=self._w._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise translate_sdk_error(exc) from exc
+        for attempt in range(_RAW_MAX_RETRIES + 1):
+            try:
+                response = httpx.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=json_body,
+                    params=params,
+                    timeout=self._w._timeout,
+                )
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                # The two the SDK retries. Everything else it raises at once,
+                # and so does this.
+                if attempt == _RAW_MAX_RETRIES:
+                    raise translate_sdk_error(exc) from exc
+                time.sleep(_raw_backoff(None, attempt))
+                continue
+            except httpx.HTTPError as exc:
+                raise translate_sdk_error(exc) from exc
 
-        try:
-            body = response.json() if response.content else None
-        except ValueError:
-            body = response.text or None
+            try:
+                body = response.json() if response.content else None
+            except ValueError:
+                body = response.text or None
 
-        if response.is_error:
-            raise HydraDBClientError(response.status_code, _stringify_body(body))
+            if response.is_error:
+                if attempt < _RAW_MAX_RETRIES and _raw_should_retry(response.status_code):
+                    time.sleep(_raw_backoff(response, attempt))
+                    continue
+                raise HydraDBClientError(response.status_code, _stringify_body(body))
 
-        return _unwrap_payload(body)
+            return _unwrap_payload(body)
+        # Unreachable: the last attempt above always returns or raises.
+        raise AssertionError("retry loop exited without a result")
 
 
 class _Databases(_Resource):

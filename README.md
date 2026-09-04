@@ -242,13 +242,13 @@ file arguments are always knowledge sources.
 
 | Option | Description |
 |--------|-------------|
-| `--kind` | `memory` (default) or `knowledge`; on a unified database everything is `unified` and this is chosen for you |
+| `--kind` | `memory` (default) or `knowledge`; on a unified database leave it unset and `unified` is chosen for you, or pass `unified` yourself |
 | `--text` / `-t` | Text to ingest. Use `-` to read from stdin |
 | `--title` | Optional title |
 | `--source-id` | Client-assigned source identifier |
-| `--user-name` | User name (memory only) |
+| `--user-name` | User name (memory only; refused on a unified database) |
 | `--infer` / `--no-infer` | Extract insights and build the knowledge graph (default on) |
-| `--markdown` | Treat text as markdown (memory only) |
+| `--markdown` | Treat text as markdown (memory only; refused on a unified database) |
 | `--upsert` / `--no-upsert` | Update existing items with the same `source_id` (default on) |
 
 ```bash
