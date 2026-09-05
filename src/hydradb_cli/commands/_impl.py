@@ -34,7 +34,24 @@ from hydradb_cli.utils.common import (
 
 VALID_MODES = {"fast", "thinking"}
 VALID_OPERATORS = {"or", "and", "phrase"}
-VALID_KINDS = {"knowledge", "memory"}
+VALID_KINDS = {"knowledge", "memory", "unified"}
+
+
+def _resolve_kind(wrapper: Any, database: str, kind: str | None, split_default: str | None = None) -> str | None:
+    """The kind a command should send when the user named none (PRO-1618).
+
+    A unified database accepts only ``unified`` (and refuses knowledge/memory),
+    a split one keeps its old default. The layout comes from one memoised
+    ``GET /databases`` probe; a failed probe reads as split, the old behaviour.
+    """
+    if kind:
+        return kind
+    layout = wrapper.databases.layout(database)
+    if layout == "unified":
+        return "unified"
+    return split_default
+
+
 VALID_FETCH_MODES = {"content", "url", "both"}
 
 _STATUS_LABELS = {
@@ -137,6 +154,7 @@ def do_query(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    kind = _resolve_kind(wrapper, tid, kind)
 
     result = _execute(
         spinner_msg,
@@ -187,6 +205,7 @@ def _format_ingest_memory(r: dict, text: str):
 def do_ingest_memory(
     text: str,
     *,
+    kind: str | None = None,
     title: str | None = None,
     source_id: str | None = None,
     user_name: str | None = None,
@@ -196,14 +215,20 @@ def do_ingest_memory(
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
+    if kind and kind not in VALID_KINDS:
+        print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    # The user's ``--kind`` wins, exactly as it does on every other command.
+    # Passing ``None`` here discarded what they typed and re-derived it, so
+    # ``--kind unified`` against a split database quietly became ``memory``.
+    kind = _resolve_kind(wrapper, tid, kind, "memory")
 
     result = _execute(
         "Adding memory...",
         lambda: wrapper.context.ingest(
-            kind="memory",
+            kind=kind,
             text=text,
             title=title,
             source_id=source_id,
@@ -221,19 +246,24 @@ def do_ingest_memory(
 def do_ingest_knowledge_text(
     text: str,
     *,
+    kind: str | None = None,
     title: str | None = None,
     source_id: str | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
+    if kind and kind not in VALID_KINDS:
+        print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    # As above: the user's ``--kind`` is carried through, not re-derived.
+    kind = _resolve_kind(wrapper, tid, kind, "knowledge")
 
     result = _execute(
         "Uploading text...",
         lambda: wrapper.context.ingest(
-            kind="knowledge",
+            kind=kind,
             text=text,
             title=title,
             source_id=source_id,
@@ -298,6 +328,11 @@ def do_ingest_knowledge_files(
         tid = require_tenant_id(tenant_id)
         stid = resolve_sub_tenant_id(sub_tenant_id)
         wrapper = get_wrapper()
+        if _resolve_kind(wrapper, tid, None) == "unified":
+            print_error(
+                f"Database '{tid}' is unified: files are not accepted (text only). "
+                "Extract the text and run `hydradb ingest --text ...`."
+            )
 
         result = _execute(
             f"Uploading {len(files)} file(s)...",
@@ -360,6 +395,7 @@ def do_list(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    kind = _resolve_kind(wrapper, tid, kind)
 
     result = _execute(
         spinner_msg,
@@ -470,26 +506,27 @@ def do_inspect(
 def do_delete(
     ids: list[str],
     *,
-    kind: str,
+    kind: str | None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
     clean_ids = [i.strip() for i in ids if i.strip()]
     if not clean_ids:
         print_error("IDs cannot be empty.")
-    if kind not in VALID_KINDS:
+    if kind and kind not in VALID_KINDS:
         print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    kind = _resolve_kind(wrapper, tid, kind, "knowledge")
 
     result = _execute(
         "Deleting...",
         lambda: wrapper.context.delete(ids=clean_ids, kind=kind, database=tid, collection=stid),
     )
 
-    noun = "memory" if kind == "memory" else "knowledge source(s)"
+    noun = "memory" if kind == "memory" else ("item(s)" if kind == "unified" else "knowledge source(s)")
     # v2 returns HTTP 200 with {success:false, deleted_count:0} when nothing
     # matched — that is a no-op, not a success. Surface it as an error (non-zero
     # exit, and `{"success":false,"error":…}` in json mode) rather than claiming
@@ -525,6 +562,7 @@ def do_relations(
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
 
+    kind = _resolve_kind(wrapper, tid, kind)
     result = _execute(
         "Fetching graph relations...",
         lambda: wrapper.context.relations(id=source_id, kind=kind, limit=limit, acl=acl, database=tid, collection=stid),
@@ -697,9 +735,11 @@ def do_ingestion_status(
 # ── database group ───────────────────────────────────────────────────────────
 
 
-def do_database_create(database: str) -> None:
+def do_database_create(database: str, layout: str | None = None) -> None:
     if not database.strip():
         print_error("Database ID cannot be empty.")
+    if layout and layout not in ("split", "unified"):
+        print_error(f"--type must be 'split' or 'unified'. Got '{layout}'.")
 
     # is_embeddings_tenant is deliberately not passed. The API treats it as an
     # internal flag: it provisions a raw-embeddings collection *instead of* the
@@ -708,9 +748,10 @@ def do_database_create(database: str) -> None:
     wrapper = get_wrapper()
     result = _execute(
         "Creating database...",
-        lambda: wrapper.databases.create(database=database),
+        lambda: wrapper.databases.create(database=database, type=layout),
     )
-    print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.")
+    suffix = " (unified: one corpus, no --kind needed)" if layout == "unified" else ""
+    print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.{suffix}")
 
 
 def do_database_delete(database: str) -> None:
@@ -729,7 +770,11 @@ def do_database_list() -> None:
         ids = r.get("databases") or r.get("tenant_ids") or []
         if not ids:
             return "[dim]No databases found.[/dim]"
-        return make_table("Database ID", rows=[[i] for i in ids], title=f"Found {len(ids)} database(s)")
+        # `details[]` (PRO-1618) carries each database's storage layout; older
+        # servers omit it, in which case every row is split.
+        layouts = {row.get("database"): row.get("type") for row in (r.get("details") or []) if isinstance(row, dict)}
+        rows = [[i, layouts.get(i) or "split"] for i in ids]
+        return make_table("Database ID", "Type", rows=rows, title=f"Found {len(ids)} database(s)")
 
     print_result(result, fmt)
 

@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Unified databases (PRO-1618).** `hydradb database create <name> --type unified` provisions a database with ONE corpus instead of separate knowledge and memory corpora. On such a database `query`, `list`, `delete` and `relations` default `--kind` to `unified` (the only value the server accepts there; `memory`/`knowledge` are refused with a 400), and `ingest --text` sends the unified `items[]` shape. The layout is read once per process from `GET /databases` (`details[].type`), so nothing changes for a split database: every existing default is exactly what it was, and a probe that fails reads as split. `database list` shows each database's type. File ingest is refused on a unified database with a message pointing at `--text`, because a unified database is text-only.
+
+  An explicit `--kind` is honoured on `ingest` too, not just on the commands above: it used to be discarded and re-derived from the layout, so `ingest --kind unified` against a split database quietly became `memory`. `--markdown` and `--user-name` are carried onto the unified item rather than dropped — both are fields on the server's ingest item, so a markdown sync can say so and a text item can name its speaker on a unified database exactly as it can on a split one.
+
+  The pinned SDK predates the change (no `type` on create, no `items` on ingest, no `details[]`), so those three calls plus `database list` go over the wrapper's hand-rolled v2 path (`_Resource._raw`, the same path `graph` already uses) with the same headers, envelope unwrap, error translation and retry policy — two retries on 429/5xx/408/409 with the SDK's own backoff, so a single transient 502 does not fail `database list` outright or make the layout probe read split on a unified database. When the regenerated SDK lands they move back onto it and no caller changes.
+
+### Added
+
 - **`hydradb graph` — full Cypher over graph collections you own (BYOG).** HydraDB's graph database offering had no CLI surface at all: `query`, `ingest` and the rest address the memory and knowledge corpora, and the property graphs users model and own end to end were reachable only through the raw API. This adds `graph query`, `graph collections`, `graph load`, `graph database create/delete` and `graph collection delete`. Everything existing is untouched — the two stores are separate, and nothing crosses between them.
 
   `graph query` takes parameters through `--param k=v` (values parse as JSON when they can, so `--param n=3` is the number 3) or `--params-json`. `--output json` prints the rows verbatim, so `hydradb graph query ... | jq '.[].name'` works without unwrapping an envelope.

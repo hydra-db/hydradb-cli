@@ -17,7 +17,9 @@ Responsibilities (CONTRACT §2):
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
+from random import random
 from typing import Any
 from urllib.parse import quote
 
@@ -91,6 +93,67 @@ def _bool_str(value: bool | None) -> str | None:
     return "true" if value else "false"
 
 
+LAYOUT_SPLIT = "split"
+LAYOUT_UNIFIED = "unified"
+
+# Retry policy for the hand-rolled path below, matched to the pinned SDK's
+# (``hydra_db/core/http_client.py``): two retries, the same statuses, the same
+# 1s-doubling backoff with jitter, and the same preference for whatever the
+# server itself asked for.
+#
+# It is stated here rather than imported because those are the SDK's private
+# module functions and the wrapper is the firewall (CONTRACT S2). Matching the
+# policy matters because ``databases.list()`` moved onto this path: without it a
+# single 502 fails ``hydradb database list`` outright, and — worse — ``layouts()``
+# reads through the same call, so a transient blip makes the layout probe read
+# split and sends ``type=knowledge`` at a unified database, turning someone
+# else's flap into a 400 the user did not cause.
+_RAW_MAX_RETRIES = 2
+_RAW_INITIAL_RETRY_DELAY_SECONDS = 1.0
+_RAW_MAX_RETRY_DELAY_SECONDS = 60.0
+_RAW_JITTER_FACTOR = 0.2
+# 408 and 409 join the 5xx and 429 set because the SDK retries them too.
+_RAW_RETRY_STATUSES = frozenset({408, 409, 429})
+
+
+def _raw_should_retry(status: int) -> bool:
+    return status >= 500 or status in _RAW_RETRY_STATUSES
+
+
+def _raw_retry_after(headers: Any) -> float | None:
+    """The wait the server asked for, in seconds, or ``None`` if it asked for none.
+
+    The HTTP-date form of ``Retry-After`` is deliberately not parsed: it falls
+    through to the exponential backoff, which is a safe answer, where a
+    mis-parsed date is not.
+    """
+    raw_ms = headers.get("retry-after-ms")
+    if raw_ms is not None:
+        try:
+            return float(raw_ms) / 1000
+        except ValueError:
+            pass
+    raw_seconds = headers.get("retry-after")
+    if raw_seconds is not None:
+        try:
+            return float(raw_seconds)
+        except ValueError:
+            pass
+    return None
+
+
+def _raw_backoff(response: httpx.Response | None, attempt: int) -> float:
+    """Seconds to wait before attempt ``attempt + 1``."""
+    if response is not None:
+        asked = _raw_retry_after(response.headers)
+        if asked is not None and asked > 0:
+            return min(asked, _RAW_MAX_RETRY_DELAY_SECONDS)
+    backoff = min(_RAW_INITIAL_RETRY_DELAY_SECONDS * 2.0**attempt, _RAW_MAX_RETRY_DELAY_SECONDS)
+    # Symmetric jitter so a fleet of clients does not retry in lockstep. Not a
+    # security decision, so the stdlib generator is the right one.
+    return backoff * (1 + (random() - 0.5) * _RAW_JITTER_FACTOR)  # noqa: S311 - retry spacing, not a secret
+
+
 class _Resource:
     """Base for the ``databases``/``context`` sub-resources."""
 
@@ -114,6 +177,64 @@ class _Resource:
         except (ApiError, ParsingError, httpx.HTTPError) as exc:
             raise translate_sdk_error(exc) from exc
 
+    def _raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Any = None,
+        params: dict | None = None,
+    ) -> Any:
+        """One hand-rolled v2 call, for what the pinned SDK cannot send yet.
+
+        PRO-1618 added ``type`` to ``POST /databases``, ``items`` to
+        ``POST /context/ingest`` and ``details[]`` to ``GET /databases``; the
+        generated client drops fields it does not know. Same headers, envelope
+        unwrap, error translation AND retry policy as the SDK path, so callers
+        cannot tell which one they got.
+        """
+        url = f"{self._w._base_url.rstrip('/')}{path}"
+        headers = {
+            "Authorization": f"Bearer {self._w._token}",
+            "Content-Type": "application/json",
+            # CONTRACT S2 rule 6: every v2 call names its version.
+            "API-Version": "2",
+        }
+        for attempt in range(_RAW_MAX_RETRIES + 1):
+            try:
+                response = httpx.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=json_body,
+                    params=params,
+                    timeout=self._w._timeout,
+                )
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                # The two the SDK retries. Everything else it raises at once,
+                # and so does this.
+                if attempt == _RAW_MAX_RETRIES:
+                    raise translate_sdk_error(exc) from exc
+                time.sleep(_raw_backoff(None, attempt))
+                continue
+            except httpx.HTTPError as exc:
+                raise translate_sdk_error(exc) from exc
+
+            try:
+                body = response.json() if response.content else None
+            except ValueError:
+                body = response.text or None
+
+            if response.is_error:
+                if attempt < _RAW_MAX_RETRIES and _raw_should_retry(response.status_code):
+                    time.sleep(_raw_backoff(response, attempt))
+                    continue
+                raise HydraDBClientError(response.status_code, _stringify_body(body))
+
+            return _unwrap_payload(body)
+        # Unreachable: the last attempt above always returns or raises.
+        raise AssertionError("retry loop exited without a result")
+
 
 class _Databases(_Resource):
     """Database-scoped operations (was the ``tenant`` group)."""
@@ -125,7 +246,22 @@ class _Databases(_Resource):
         embeddings_dimension: int | None = None,
         is_embeddings_tenant: bool | None = None,
         database_metadata_schema: Any | None = None,
+        type: str | None = None,
     ) -> dict:
+        """Create a database. ``type`` is the storage layout (PRO-1618):
+        ``split`` (the default, what every existing database is) or
+        ``unified`` (one corpus; ``type`` on every later call defaults to
+        ``unified`` and knowledge/memory are refused)."""
+        if type is not None:
+            if type not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
+                raise ValueError(f"type must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}', got {type!r}")
+            body: dict[str, Any] = {"database": database, "type": type}
+            if embeddings_dimension is not None:
+                body["embeddings_dimension"] = embeddings_dimension
+            if database_metadata_schema is not None:
+                body["database_metadata_schema"] = database_metadata_schema
+            result = self._raw("POST", "/databases", json_body=body)
+            return result if isinstance(result, dict) else {}
         resp = self._invoke(
             self._w._sdk.databases.create,
             database=database,
@@ -140,8 +276,34 @@ class _Databases(_Resource):
         return _unwrap(resp)
 
     def list(self) -> dict:
-        resp = self._invoke(self._w._sdk.databases.list)
-        return _unwrap(resp)
+        """``GET /databases``. Hand-rolled rather than the SDK call because the
+        pinned SDK's response model predates ``details[]`` (PRO-1618) and would
+        drop every database's layout on the way through."""
+        result = self._raw("GET", "/databases")
+        return result if isinstance(result, dict) else {}
+
+    def layouts(self) -> dict[str, str]:
+        """Every database this key can see, mapped to its storage layout,
+        from ``GET /databases`` ``details[]``. Memoised: a layout is fixed at
+        creation, so it cannot go stale."""
+        cached = getattr(self._w, "_layouts", None)
+        if cached is not None:
+            return cached
+        listed = self.list()
+        layouts: dict[str, str] = {}
+        for row in (listed.get("details") or []) if isinstance(listed, dict) else []:
+            if isinstance(row, dict) and row.get("database"):
+                layouts[str(row["database"])] = LAYOUT_UNIFIED if row.get("type") == LAYOUT_UNIFIED else LAYOUT_SPLIT
+        self._w._layouts = layouts
+        return layouts
+
+    def layout(self, database: str) -> str:
+        """The layout of one database; anything unknown (or a failed probe)
+        reads as ``split``, which every pre-PRO-1618 database is."""
+        try:
+            return self.layouts().get(database, LAYOUT_SPLIT)
+        except Exception:  # noqa: BLE001 - the worst case is the old default
+            return LAYOUT_SPLIT
 
     def collections(self, *, database: str | None = None) -> dict:
         resp = self._invoke(self._w._sdk.databases.collections, database=self._w._require_database(database))
@@ -230,6 +392,29 @@ class _Context(_Resource):
         Multi-file ingest is a caller-side loop over this method (see
         ``ingest_many``); the SDK's ``documents`` takes exactly one file.
         """
+        if kind == LAYOUT_UNIFIED:
+            if documents is not None:
+                raise ValueError(
+                    "files are not accepted on a unified database (text only); extract the text and pass it as --text"
+                )
+            item: dict[str, Any] = {"enrich": True if infer is None else bool(infer)}
+            if text is not None:
+                item["text"] = text
+            if title:
+                item["title"] = title
+            if source_id:
+                item["context_id"] = source_id
+            # `is_markdown` and `user_name` are on IngestItem (PRO-1618), so they
+            # are carried rather than dropped. This path only ever sends a TEXT
+            # item, which is exactly the case the server fills `user_name` from:
+            # a conversation names its speaker per turn and that stays
+            # authoritative, but there are no turns here.
+            if is_markdown is not None:
+                item["is_markdown"] = bool(is_markdown)
+            if user_name:
+                item["user_name"] = user_name
+            return self.ingest_items([item], upsert=upsert, database=database, collection=collection)
+
         memories: str | None = None
         app_knowledge: str | None = None
         if kind == "memory":
@@ -265,6 +450,30 @@ class _Context(_Resource):
             upsert=_bool_str(upsert),
         )
         return _unwrap(resp)
+
+    def ingest_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        upsert: bool | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> dict:
+        """The unified ingest shape (PRO-1618): ``items[]``, each item ``text``
+        or a ``conversation``, no corpus selector. Sent as the JSON body of
+        ``POST /context/ingest``. On a split database the items land in its
+        memory corpus."""
+        body: dict[str, Any] = {
+            "database": self._w._require_database(database),
+            "items": items,
+        }
+        coll = self._w._resolve_collection(collection)
+        if coll:
+            body["collection"] = coll
+        if upsert is not None:
+            body["upsert"] = bool(upsert)
+        result = self._raw("POST", "/context/ingest", json_body=body)
+        return result if isinstance(result, dict) else {}
 
     def ingest_many(
         self,
@@ -467,39 +676,10 @@ class _Graph(_Resource):
     """
 
     def _request(self, method: str, path: str, *, json_body: Any = None, params: dict | None = None) -> Any:
-        url = f"{self._w._base_url.rstrip('/')}{path}"
-        headers = {
-            "Authorization": f"Bearer {self._w._token}",
-            "Content-Type": "application/json",
-            # CONTRACT §2 rule 6. The SDK sends this on every call; a hand-rolled
-            # path that omitted it would silently get v1 behaviour from the same
-            # endpoints.
-            "API-Version": "2",
-        }
-        try:
-            response = httpx.request(
-                method,
-                url,
-                headers=headers,
-                json=json_body,
-                params=params,
-                timeout=self._w._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise translate_sdk_error(exc) from exc
-
-        try:
-            body = response.json() if response.content else None
-        except ValueError:
-            body = response.text or None
-
-        if response.is_error:
-            # Route through the same message extraction the SDK path uses, so a
-            # rejected Cypher query surfaces the compiler's own feedback rather
-            # than a bare status code.
-            raise HydraDBClientError(response.status_code, _stringify_body(body))
-
-        return _unwrap_payload(body)
+        # The same hand-rolled path every resource can use; a rejected Cypher
+        # query surfaces the compiler's own feedback through the shared
+        # message extraction rather than a bare status code.
+        return self._raw(method, path, json_body=json_body, params=params)
 
     def query(
         self,
