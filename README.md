@@ -225,6 +225,7 @@ Retrieve knowledge or memories — the single entry point for search.
 | `--recency-bias` | Preference for newer content (`0.0`–`1.0`) |
 | `--graph-context` / `--no-graph-context` | Include knowledge graph relations |
 | `--context` | Additional context to guide retrieval |
+| `--acl` | Principals to answer as, repeatable. Defaults to `HYDRADB_ACL`. Omit both to search everything the API key can reach |
 
 ```bash
 hydradb query "What did the team say about pricing?"
@@ -270,10 +271,10 @@ Browse and read back what you have stored.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `list` | Lists ingested sources and memories | `--kind`, `--page`, `--page-size` |
-| `inspect <id>` | Fetches a source's content or a presigned download URL | `--mode` (`content`, `url`, `both`) |
-| `relations <id>` | Knowledge graph triplets linked to a source | `--kind`, `--limit` |
-| `subgraph <id>` | Everything connected to one item — its thread, replies, parents, children, links — traversed breadth-first | `--kind`, `--depth`, `--max-sources` |
+| `list` | Lists ingested sources and memories | `--kind`, `--page`, `--page-size`, `--acl` |
+| `inspect <id>` | Fetches a source's content or a presigned download URL | `--mode` (`content`, `url`, `both`), `--acl` |
+| `relations <id>` | Knowledge graph triplets linked to a source | `--kind`, `--limit`, `--acl` |
+| `subgraph <id>` | Everything connected to one item — its thread, replies, parents, children, links — traversed breadth-first | `--kind`, `--depth`, `--max-sources`, `--acl` |
 | `verify <ids...>` | Checks indexing progress of uploaded sources | — |
 
 ```bash
@@ -515,6 +516,7 @@ hydradb config set base_url https://api.hydradb.com
 | `HYDRADB_API_KEY` | API key (overrides config file) | `HYDRA_DB_API_KEY` |
 | `HYDRADB_DATABASE` | Default database (overrides config file) | `HYDRA_DB_TENANT_ID` |
 | `HYDRADB_COLLECTION` | Default collection (overrides config file) | `HYDRA_DB_SUB_TENANT_ID` |
+| `HYDRADB_ACL` | Default `--acl` principals (comma- or whitespace-separated). `--acl` on the command line wins. Omit both to search everything the API key can reach | — |
 | `HYDRADB_BASE_URL` | API base URL (default `https://api.hydradb.com`) | `HYDRA_DB_BASE_URL`, `HYDRADB_API_URL` |
 | `HYDRADB_OUTPUT` | Default output format — `human` or `json` | — |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection for `hydradb graph` (default `default`) | — |

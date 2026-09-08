@@ -12,6 +12,7 @@ its canonical replacement. The canonical name wins when both are set.
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ ENV_API_KEY = "HYDRADB_API_KEY"
 ENV_DATABASE = "HYDRADB_DATABASE"
 ENV_COLLECTION = "HYDRADB_COLLECTION"
 ENV_BASE_URL = "HYDRADB_BASE_URL"
+ENV_ACL = "HYDRADB_ACL"
 # Graph (BYOG) scope. A graph collection is a different namespace from a
 # context collection, so it is configured separately and never falls back to
 # HYDRADB_COLLECTION — Cypher aimed at the wrong one reads an empty graph
@@ -126,6 +128,19 @@ def get_graph_collection() -> str:
     """
     file_cfg = _read_config_file()
     return _env(ENV_GRAPH_COLLECTION) or file_cfg.get("graph_collection") or DEFAULT_GRAPH_COLLECTION
+
+
+def get_acl() -> list[str] | None:
+    """Default principals to answer as, from ``HYDRADB_ACL``.
+
+    Comma- or whitespace-separated. Returns ``None`` when unset or empty —
+    never an empty list, because the API treats ``[]`` as unrestricted.
+    """
+    raw = _env(ENV_ACL)
+    if not raw:
+        return None
+    principals = [p for p in re.split(r"[,\s]+", raw.strip()) if p]
+    return principals or None
 
 
 # Historical names kept as thin aliases so existing call sites keep working.

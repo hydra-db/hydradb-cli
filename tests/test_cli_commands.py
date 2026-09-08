@@ -26,6 +26,7 @@ _HYDRA_ENV_VARS = (
     "HYDRADB_API_KEY",
     "HYDRADB_DATABASE",
     "HYDRADB_COLLECTION",
+    "HYDRADB_ACL",
     "HYDRADB_BASE_URL",
     "HYDRADB_OUTPUT",
     "HYDRADB_TENANT_ID",
@@ -168,6 +169,37 @@ class TestQuery:
         with _patch_wrapper(_wrapper()):
             result = runner.invoke(app, ["query", "x", "--mode", "bogus"])
         assert result.exit_code != 0
+
+    def test_query_acl_from_env(self, monkeypatch):
+        _auth()
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com, group:google:eng@corp.com")
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "q"])
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["acl"] == ["alice@corp.com", "group:google:eng@corp.com"]
+
+    def test_query_acl_flag_overrides_env(self, monkeypatch):
+        _auth()
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com")
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "q", "--acl", "bob@corp.com"])
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["acl"] == ["bob@corp.com"]
+
+    def test_query_without_acl_or_env_omits_the_field(self):
+        _auth()
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "q"])
+        assert result.exit_code == 0
+        assert not w.context.query.call_args.kwargs.get("acl")
+
+    def test_query_help_names_the_unrestricted_default(self):
+        help_text = _help_text("query")
+        assert "HYDRADB_ACL" in help_text
+        assert "Omit --acl and HYDRADB_ACL to search everything the API key can reach." in help_text
 
 
 class TestIngest:

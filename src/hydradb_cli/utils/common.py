@@ -4,9 +4,16 @@ import sys
 
 import httpx
 
-from hydradb_cli.config import get_api_key, get_base_url, get_collection, get_database, get_graph_collection
+from hydradb_cli.config import get_acl, get_api_key, get_base_url, get_collection, get_database, get_graph_collection
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
 from hydradb_cli.output import print_error, warn_deprecated
+
+# Shared by every command that takes --acl so the omit-means-unrestricted line
+# cannot drift between query/list/inspect/relations/subgraph and the aliases.
+ACL_OPTION_HELP = (
+    "Principals to answer as, repeatable. Defaults to HYDRADB_ACL. "
+    "Omit --acl and HYDRADB_ACL to search everything the API key can reach."
+)
 
 
 def mask_api_key(key: str) -> str:
@@ -35,6 +42,19 @@ def require_tenant_id(tenant_id: str | None = None) -> str:
 def resolve_sub_tenant_id(sub_tenant_id: str | None = None) -> str | None:
     """Get the collection (sub-tenant) scope from argument or config (may be None)."""
     return sub_tenant_id or get_collection()
+
+
+def resolve_acl(acl: list[str] | None = None) -> list[str] | None:
+    """CLI ``--acl`` wins over ``HYDRADB_ACL``. Never returns an empty list.
+
+    The API treats ``[]`` as unrestricted (the same as omitting the field), so
+    sending an empty list would not mean "nobody".
+    """
+    if acl:
+        principals = [p.strip() for p in acl if p and p.strip()]
+        if principals:
+            return principals
+    return get_acl()
 
 
 def resolve_scope_flags(

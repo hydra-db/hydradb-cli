@@ -9,6 +9,7 @@ import typer
 
 from hydradb_cli.commands import _impl
 from hydradb_cli.output import warn_deprecated
+from hydradb_cli.utils.common import ACL_OPTION_HELP
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Recall context — use 'hydradb query'.")
 
@@ -26,9 +27,7 @@ def full_recall(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
-    acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
 ) -> None:
     """[dim](deprecated)[/dim] Search indexed knowledge — use 'hydradb query --kind knowledge'."""
     warn_deprecated("recall full", "query --kind knowledge")
@@ -60,9 +59,7 @@ def recall_preferences(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
-    acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
 ) -> None:
     """[dim](deprecated)[/dim] Search user memories — use 'hydradb query --kind memory'."""
     warn_deprecated("recall preferences", "query --kind memory")
@@ -92,9 +89,7 @@ def keyword_recall(
     search_mode: str | None = typer.Option(
         None, "--search-mode", help="What to search: 'sources' (knowledge) or 'memories'."
     ),
-    acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
 ) -> None:
     """[dim](deprecated)[/dim] Keyword/boolean search — use 'hydradb query --operator'."""
     warn_deprecated("recall keyword", "query --operator")

@@ -9,6 +9,7 @@ import typer
 from hydradb_cli.commands import _impl
 from hydradb_cli.commands.canonical import _resolve_text_input
 from hydradb_cli.output import warn_deprecated
+from hydradb_cli.utils.common import ACL_OPTION_HELP
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Memory operations — use 'hydradb ingest/list/delete'.")
 
@@ -44,9 +45,7 @@ def add(
 def list_memories(
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
-    acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
 ) -> None:
     """[dim](deprecated)[/dim] List memories — use 'hydradb list --kind memory'."""
     warn_deprecated("memories list", "list --kind memory")

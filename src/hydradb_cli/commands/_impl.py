@@ -28,6 +28,7 @@ from hydradb_cli.utils.common import (
     handle_api_error,
     handle_network_error,
     require_tenant_id,
+    resolve_acl,
     resolve_sub_tenant_id,
     validate_range,
 )
@@ -136,6 +137,7 @@ def do_query(
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
+    acl = resolve_acl(acl)
     wrapper = get_wrapper()
 
     result = _execute(
@@ -359,6 +361,7 @@ def do_list(
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
+    acl = resolve_acl(acl)
     wrapper = get_wrapper()
 
     result = _execute(
@@ -419,6 +422,7 @@ def do_inspect(
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
+    acl = resolve_acl(acl)
     wrapper = get_wrapper()
 
     try:
@@ -523,6 +527,7 @@ def do_relations(
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
+    acl = resolve_acl(acl)
     wrapper = get_wrapper()
 
     result = _execute(
@@ -581,6 +586,7 @@ def do_subgraph(
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
+    acl = resolve_acl(acl)
     wrapper = get_wrapper()
 
     result = _execute(
