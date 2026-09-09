@@ -207,14 +207,17 @@ def clear_config() -> None:
 def get_full_config() -> dict:
     """Return the resolved config (env vars override file values)."""
     file_cfg = _read_config_file()
+    acl = get_acl()
     return {
         "api_key": get_api_key(),
         "tenant_id": get_database(),
         "sub_tenant_id": get_collection(),
+        "acl": acl,
         "base_url": get_base_url(),
         "config_file": str(CONFIG_FILE),
         "api_key_source": "env" if _env(ENV_API_KEY) else ("file" if file_cfg.get("api_key") else "none"),
         "tenant_id_source": "env"
         if _env(ENV_DATABASE)
         else ("file" if (file_cfg.get("database") or file_cfg.get("tenant_id")) else "none"),
+        "acl_source": "env" if acl else "none",
     }

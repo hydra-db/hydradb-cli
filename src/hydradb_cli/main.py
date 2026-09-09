@@ -40,6 +40,7 @@ from hydradb_cli.commands import (
     tenant,
 )
 from hydradb_cli.output import console, set_output_format
+from hydradb_cli.utils.common import ACL_UNRESTRICTED_HELP
 
 app = typer.Typer(
     name="hydradb",
@@ -85,15 +86,33 @@ def main(
 
 
 # ── Canonical commands ───────────────────────────────────────────────────────
-app.command(name="query", help="Retrieve knowledge or memories.")(canonical.query)
+app.command(
+    name="query",
+    short_help="Retrieve knowledge or memories.",
+    help=f"Retrieve knowledge or memories.\n\n{ACL_UNRESTRICTED_HELP}",
+)(canonical.query)
 app.command(name="ingest", help="Store memories or knowledge (text or files).")(canonical.ingest)
-app.command(name="list", help="List ingested sources and memories.")(canonical.list_items)
-app.command(name="inspect", help="Fetch a source's content by ID.")(canonical.inspect)
+app.command(
+    name="list",
+    short_help="List ingested sources and memories.",
+    help=f"List ingested sources and memories.\n\n{ACL_UNRESTRICTED_HELP}",
+)(canonical.list_items)
+app.command(
+    name="inspect",
+    short_help="Fetch a source's content by ID.",
+    help=f"Fetch a source's content by ID.\n\n{ACL_UNRESTRICTED_HELP}",
+)(canonical.inspect)
 app.command(name="delete", help="Delete memories or knowledge sources.")(canonical.delete)
-app.command(name="relations", help="Explore knowledge-graph relations.")(canonical.relations)
-app.command(name="subgraph", help="Everything connected to one item: thread, replies, hierarchy, links.")(
-    canonical.subgraph
-)
+app.command(
+    name="relations",
+    short_help="Explore knowledge-graph relations.",
+    help=f"Explore knowledge-graph relations.\n\n{ACL_UNRESTRICTED_HELP}",
+)(canonical.relations)
+app.command(
+    name="subgraph",
+    short_help="Everything connected to one item: thread, replies, hierarchy, links.",
+    help=("Everything connected to one item: thread, replies, hierarchy, links.\n\n" + ACL_UNRESTRICTED_HELP),
+)(canonical.subgraph)
 app.command(name="verify", help="Check per-source ingestion status.")(canonical.verify)
 app.command(name="doctor", help="Check config and API reachability.")(canonical.doctor)
 app.add_typer(canonical.database_app, name="database", help="[bold]Database[/bold] management.")

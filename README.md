@@ -516,7 +516,7 @@ hydradb config set base_url https://api.hydradb.com
 | `HYDRADB_API_KEY` | API key (overrides config file) | `HYDRA_DB_API_KEY` |
 | `HYDRADB_DATABASE` | Default database (overrides config file) | `HYDRA_DB_TENANT_ID` |
 | `HYDRADB_COLLECTION` | Default collection (overrides config file) | `HYDRA_DB_SUB_TENANT_ID` |
-| `HYDRADB_ACL` | Default `--acl` principals (comma- or whitespace-separated). `--acl` on the command line wins. Omit both to search everything the API key can reach | — |
+| `HYDRADB_ACL` | Default `--acl` principals (comma- or whitespace-separated). `--acl` on the command line wins, including an empty value (unrestricted). Omit both to search everything the API key can reach | — |
 | `HYDRADB_BASE_URL` | API base URL (default `https://api.hydradb.com`) | `HYDRA_DB_BASE_URL`, `HYDRADB_API_URL` |
 | `HYDRADB_OUTPUT` | Default output format — `human` or `json` | — |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection for `hydradb graph` (default `default`) | — |

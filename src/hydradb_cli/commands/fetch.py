@@ -7,7 +7,7 @@ import typer
 
 from hydradb_cli.commands import _impl
 from hydradb_cli.output import warn_deprecated
-from hydradb_cli.utils.common import ACL_OPTION_HELP
+from hydradb_cli.utils.common import ACL_OPTION_HELP, acl_flag
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Inspect stored data — use 'hydradb inspect/list/relations'.")
 
@@ -22,9 +22,7 @@ def content(
 ) -> None:
     """[dim](deprecated)[/dim] Fetch source content — use 'hydradb inspect'."""
     warn_deprecated("fetch content", "inspect")
-    _impl.do_inspect(
-        source_id, mode=mode, acl=list(acl) if acl else None, tenant_id=tenant_id, sub_tenant_id=sub_tenant_id
-    )
+    _impl.do_inspect(source_id, mode=mode, acl=acl_flag(acl), tenant_id=tenant_id, sub_tenant_id=sub_tenant_id)
 
 
 @app.command()
@@ -45,7 +43,7 @@ def sources(
         kind=canonical_kind,
         page=page,
         page_size=page_size,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )
@@ -69,7 +67,7 @@ def relations(
         source_id,
         kind=kind,
         limit=limit,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )

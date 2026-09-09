@@ -17,7 +17,7 @@ from rich.panel import Panel
 from hydradb_cli.commands import _impl
 from hydradb_cli.config import get_full_config
 from hydradb_cli.output import console, make_kv_table, print_error, print_json, spinner
-from hydradb_cli.utils.common import ACL_OPTION_HELP, mask_api_key, read_stdin_safe, resolve_scope_flags
+from hydradb_cli.utils.common import ACL_OPTION_HELP, acl_flag, mask_api_key, read_stdin_safe, resolve_scope_flags
 
 database_app = typer.Typer(help="Manage [bold]databases[/bold] (create, delete, list, collections, stats, readiness).")
 
@@ -63,7 +63,10 @@ def query(
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Query knowledge or memories — the single retrieval entry point."""
+    """Query knowledge or memories — the single retrieval entry point.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_query(
         query_text,
@@ -75,7 +78,7 @@ def query(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tid,
         sub_tenant_id=stid,
     )
@@ -144,11 +147,12 @@ def list_items(
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """List ingested sources and memories."""
+    """List ingested sources and memories.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_list(
-        kind=kind, page=page, page_size=page_size, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
-    )
+    _impl.do_list(kind=kind, page=page, page_size=page_size, acl=acl_flag(acl), tenant_id=tid, sub_tenant_id=stid)
 
 
 def inspect(
@@ -160,9 +164,12 @@ def inspect(
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Inspect a source's content by its ID."""
+    """Inspect a source's content by its ID.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_inspect(source_id, mode=mode, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid)
+    _impl.do_inspect(source_id, mode=mode, acl=acl_flag(acl), tenant_id=tid, sub_tenant_id=stid)
 
 
 def delete(
@@ -194,11 +201,12 @@ def relations(
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Fetch knowledge-graph relations for a source."""
+    """Fetch knowledge-graph relations for a source.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_relations(
-        source_id, kind=kind, limit=limit, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
-    )
+    _impl.do_relations(source_id, kind=kind, limit=limit, acl=acl_flag(acl), tenant_id=tid, sub_tenant_id=stid)
 
 
 def subgraph(
@@ -212,14 +220,17 @@ def subgraph(
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Everything connected to one item: its thread, replies, parents, children, links."""
+    """Everything connected to one item: its thread, replies, parents, children, links.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_subgraph(
         source_id,
         kind=kind,
         depth=depth,
         max_sources=max_sources,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tid,
         sub_tenant_id=stid,
     )
@@ -273,6 +284,11 @@ def doctor() -> None:
     pairs.append(("Database", cfg.get("tenant_id") or "[dim]Not configured[/dim]"))
     if cfg.get("sub_tenant_id"):
         pairs.append(("Collection", cfg["sub_tenant_id"]))
+    acl = cfg.get("acl")
+    if acl:
+        pairs.append(("ACL", f"{', '.join(acl)} [dim]({cfg['acl_source']})[/dim]"))
+    else:
+        pairs.append(("ACL", "[dim](not set)[/dim]"))
     pairs.append(("Base URL", cfg["base_url"]))
     if reachable is True:
         pairs.append(("Reachable", "[green]yes[/green]"))

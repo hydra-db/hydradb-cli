@@ -151,6 +151,12 @@ def whoami() -> None:
     if sub_tenant:
         pairs.append(("Collection", sub_tenant))
 
+    acl = cfg.get("acl")
+    if acl:
+        pairs.append(("ACL", f"{', '.join(acl)} [dim]({cfg['acl_source']})[/dim]"))
+    else:
+        pairs.append(("ACL", "[dim](not set)[/dim]"))
+
     pairs.append(("Base URL", cfg["base_url"]))
     pairs.append(("Config File", cfg["config_file"]))
 

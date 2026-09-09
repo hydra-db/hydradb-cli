@@ -235,6 +235,14 @@ class TestGetFullConfig:
         cfg = get_full_config()
         assert cfg["api_key_source"] == "none"
         assert cfg["tenant_id_source"] == "none"
+        assert cfg["acl"] is None
+        assert cfg["acl_source"] == "none"
+
+    def test_full_config_includes_acl(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com, bob@corp.com")
+        cfg = get_full_config()
+        assert cfg["acl"] == ["alice@corp.com", "bob@corp.com"]
+        assert cfg["acl_source"] == "env"
 
 
 class TestAclEnv:
@@ -266,7 +274,12 @@ class TestAclEnv:
     def test_env_used_when_flag_omitted(self, clean_config, monkeypatch):
         monkeypatch.setenv(ENV_ACL, "alice@corp.com, bob@corp.com")
         assert resolve_acl(None) == ["alice@corp.com", "bob@corp.com"]
-        assert resolve_acl([]) == ["alice@corp.com", "bob@corp.com"]
+
+    def test_explicit_empty_flag_does_not_use_env(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com")
+        assert resolve_acl([]) is None
+        assert resolve_acl([""]) is None
+        assert resolve_acl(["  ", ""]) is None
 
     def test_neither_omits_the_field(self, clean_config):
         assert resolve_acl(None) is None

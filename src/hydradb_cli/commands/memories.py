@@ -9,7 +9,7 @@ import typer
 from hydradb_cli.commands import _impl
 from hydradb_cli.commands.canonical import _resolve_text_input
 from hydradb_cli.output import warn_deprecated
-from hydradb_cli.utils.common import ACL_OPTION_HELP
+from hydradb_cli.utils.common import ACL_OPTION_HELP, acl_flag
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Memory operations — use 'hydradb ingest/list/delete'.")
 
@@ -51,7 +51,7 @@ def list_memories(
     warn_deprecated("memories list", "list --kind memory")
     _impl.do_list(
         kind="memory",
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
         spinner_msg="Fetching memories...",

@@ -66,6 +66,11 @@ def show() -> None:
 
     collection = cfg.get("sub_tenant_id")
     pairs.append(("collection", collection or "[dim](not set)[/dim]"))
+    acl = cfg.get("acl")
+    if acl:
+        pairs.append(("acl", f"{', '.join(acl)} [dim]({cfg['acl_source']})[/dim]"))
+    else:
+        pairs.append(("acl", "[dim](not set)[/dim]"))
     pairs.append(("base_url", cfg["base_url"]))
     pairs.append(("config_file", cfg["config_file"]))
 

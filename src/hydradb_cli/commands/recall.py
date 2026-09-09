@@ -9,7 +9,7 @@ import typer
 
 from hydradb_cli.commands import _impl
 from hydradb_cli.output import warn_deprecated
-from hydradb_cli.utils.common import ACL_OPTION_HELP
+from hydradb_cli.utils.common import ACL_OPTION_HELP, acl_flag
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Recall context — use 'hydradb query'.")
 
@@ -40,7 +40,7 @@ def full_recall(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )
@@ -72,7 +72,7 @@ def recall_preferences(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
         spinner_msg="Searching memories...",
@@ -99,7 +99,7 @@ def keyword_recall(
         kind=kind,
         operator=operator,
         max_results=max_results,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )
