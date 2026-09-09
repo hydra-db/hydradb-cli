@@ -26,6 +26,7 @@ _HYDRA_ENV_VARS = (
     "HYDRADB_API_KEY",
     "HYDRADB_DATABASE",
     "HYDRADB_COLLECTION",
+    "HYDRADB_ACL",
     "HYDRADB_BASE_URL",
     "HYDRADB_OUTPUT",
     "HYDRADB_TENANT_ID",
@@ -92,8 +93,9 @@ def _help_text(*argv: str) -> str:
         env={"COLUMNS": "200", "TERM": "dumb", "NO_COLOR": "1"},
     )
     assert result.exit_code == 0
-    # Rich may still break a long line; collapse whitespace so flags stay contiguous.
-    return re.sub(r"\s+", " ", _ANSI_RE.sub("", result.output))
+    # Rich may still break a long line and wrap it inside a panel, inserting box
+    # drawing between words. Collapse those so substring checks stay stable.
+    return re.sub(r"\s+", " ", _ANSI_RE.sub("", result.output).replace("│", " "))
 
 
 # Render at a pinned width so panel/table layout assertions do not depend on the
@@ -168,6 +170,47 @@ class TestQuery:
         with _patch_wrapper(_wrapper()):
             result = runner.invoke(app, ["query", "x", "--mode", "bogus"])
         assert result.exit_code != 0
+
+    def test_query_acl_from_env(self, monkeypatch):
+        _auth()
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com, group:google:eng@corp.com")
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "q"])
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["acl"] == ["alice@corp.com", "group:google:eng@corp.com"]
+
+    def test_query_acl_flag_overrides_env(self, monkeypatch):
+        _auth()
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com")
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "q", "--acl", "bob@corp.com"])
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["acl"] == ["bob@corp.com"]
+
+    def test_query_without_acl_or_env_omits_the_field(self):
+        _auth()
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "q"])
+        assert result.exit_code == 0
+        assert not w.context.query.call_args.kwargs.get("acl")
+
+    def test_query_blank_acl_flag_ignores_env(self, monkeypatch):
+        """An explicit empty --acl is unrestricted and must not fall back to HYDRADB_ACL."""
+        _auth()
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com")
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "q", "--acl", ""], env=_WIDE)
+        assert result.exit_code == 0
+        assert not w.context.query.call_args.kwargs.get("acl")
+
+    def test_query_help_names_the_unrestricted_default(self):
+        help_text = _help_text("query")
+        assert "HYDRADB_ACL" in help_text
+        assert "Omit --acl and HYDRADB_ACL to search everything the API key can reach." in help_text
 
 
 class TestIngest:
@@ -617,6 +660,18 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "yes" in result.output.lower()
 
+    def test_doctor_reports_acl_env(self, monkeypatch):
+        _auth()
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com, bob@corp.com")
+        w = _wrapper(**{"databases.readiness": {"infra": {"ready_for_ingestion": True}}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["doctor"], env=_WIDE)
+        assert result.exit_code == 0
+        labels = _kv_labels(result)
+        assert "ACL" in labels
+        assert "alice@corp.com" in result.output
+        assert "bob@corp.com" in result.output
+
 
 class TestDeprecatedAliases:
     """Every legacy command still works and warns once, naming its replacement."""
@@ -892,6 +947,31 @@ class TestAuthAndConfig:
         data = json.loads(result.output)
         assert data["tenant_id"] == "canon-db"
         assert "sub_tenant_id" in data
+
+    def test_config_show_reports_acl_env(self, monkeypatch):
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com, bob@corp.com")
+        result = runner.invoke(app, ["config", "show"], env=_WIDE)
+        assert result.exit_code == 0
+        labels = _kv_labels(result)
+        assert "acl" in labels
+        assert "alice@corp.com" in result.output
+        assert "bob@corp.com" in result.output
+
+    def test_config_show_json_includes_acl(self, monkeypatch):
+        monkeypatch.setenv("HYDRADB_ACL", "alice@corp.com")
+        result = runner.invoke(app, ["--output", "json", "config", "show"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["acl"] == ["alice@corp.com"]
+        assert data["acl_source"] == "env"
+
+    def test_config_show_acl_unset(self):
+        result = runner.invoke(app, ["config", "show"], env=_WIDE)
+        assert result.exit_code == 0
+        assert "acl" in _kv_labels(result)
+        data = json.loads(runner.invoke(app, ["--output", "json", "config", "show"]).output)
+        assert data["acl"] is None
+        assert data["acl_source"] == "none"
 
 
 class TestScopeFlags:

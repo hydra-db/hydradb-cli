@@ -12,6 +12,7 @@ its canonical replacement. The canonical name wins when both are set.
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ ENV_API_KEY = "HYDRADB_API_KEY"
 ENV_DATABASE = "HYDRADB_DATABASE"
 ENV_COLLECTION = "HYDRADB_COLLECTION"
 ENV_BASE_URL = "HYDRADB_BASE_URL"
+ENV_ACL = "HYDRADB_ACL"
 # Graph (BYOG) scope. A graph collection is a different namespace from a
 # context collection, so it is configured separately and never falls back to
 # HYDRADB_COLLECTION — Cypher aimed at the wrong one reads an empty graph
@@ -128,6 +130,19 @@ def get_graph_collection() -> str:
     return _env(ENV_GRAPH_COLLECTION) or file_cfg.get("graph_collection") or DEFAULT_GRAPH_COLLECTION
 
 
+def get_acl() -> list[str] | None:
+    """Default principals to answer as, from ``HYDRADB_ACL``.
+
+    Comma- or whitespace-separated. Returns ``None`` when unset or empty —
+    never an empty list, because the API treats ``[]`` as unrestricted.
+    """
+    raw = _env(ENV_ACL)
+    if not raw:
+        return None
+    principals = [p for p in re.split(r"[,\s]+", raw.strip()) if p]
+    return principals or None
+
+
 # Historical names kept as thin aliases so existing call sites keep working.
 def get_tenant_id() -> str | None:
     """Deprecated internal alias for :func:`get_database`."""
@@ -192,14 +207,17 @@ def clear_config() -> None:
 def get_full_config() -> dict:
     """Return the resolved config (env vars override file values)."""
     file_cfg = _read_config_file()
+    acl = get_acl()
     return {
         "api_key": get_api_key(),
         "tenant_id": get_database(),
         "sub_tenant_id": get_collection(),
+        "acl": acl,
         "base_url": get_base_url(),
         "config_file": str(CONFIG_FILE),
         "api_key_source": "env" if _env(ENV_API_KEY) else ("file" if file_cfg.get("api_key") else "none"),
         "tenant_id_source": "env"
         if _env(ENV_DATABASE)
         else ("file" if (file_cfg.get("database") or file_cfg.get("tenant_id")) else "none"),
+        "acl_source": "env" if acl else "none",
     }

@@ -17,7 +17,7 @@ from rich.panel import Panel
 from hydradb_cli.commands import _impl
 from hydradb_cli.config import get_full_config
 from hydradb_cli.output import console, make_kv_table, print_error, print_json, spinner
-from hydradb_cli.utils.common import mask_api_key, read_stdin_safe, resolve_scope_flags
+from hydradb_cli.utils.common import ACL_OPTION_HELP, acl_flag, mask_api_key, read_stdin_safe, resolve_scope_flags
 
 database_app = typer.Typer(help="Manage [bold]databases[/bold] (create, delete, list, collections, stats, readiness).")
 
@@ -57,17 +57,16 @@ def query(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
-    acl: list[str] | None = typer.Option(
-        None,
-        "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Query knowledge or memories — the single retrieval entry point."""
+    """Query knowledge or memories — the single retrieval entry point.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_query(
         query_text,
@@ -79,7 +78,7 @@ def query(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tid,
         sub_tenant_id=stid,
     )
@@ -142,39 +141,35 @@ def list_items(
     kind: str | None = typer.Option(None, "--kind", help="Filter by kind: 'memory' or 'knowledge'."),
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
-    acl: list[str] | None = typer.Option(
-        None,
-        "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """List ingested sources and memories."""
+    """List ingested sources and memories.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_list(
-        kind=kind, page=page, page_size=page_size, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
-    )
+    _impl.do_list(kind=kind, page=page, page_size=page_size, acl=acl_flag(acl), tenant_id=tid, sub_tenant_id=stid)
 
 
 def inspect(
     source_id: str = typer.Argument(help="Source ID to inspect."),
     mode: str = typer.Option("content", "--mode", help="Fetch mode: 'content', 'url', or 'both'."),
-    acl: list[str] | None = typer.Option(
-        None,
-        "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Inspect a source's content by its ID."""
+    """Inspect a source's content by its ID.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_inspect(source_id, mode=mode, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid)
+    _impl.do_inspect(source_id, mode=mode, acl=acl_flag(acl), tenant_id=tid, sub_tenant_id=stid)
 
 
 def delete(
@@ -200,21 +195,18 @@ def relations(
     source_id: str = typer.Argument(help="Source ID to fetch graph relations for."),
     kind: str | None = typer.Option(None, "--kind", help="Corpus: 'memory' or 'knowledge'."),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
-    acl: list[str] | None = typer.Option(
-        None,
-        "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Fetch knowledge-graph relations for a source."""
+    """Fetch knowledge-graph relations for a source.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
-    _impl.do_relations(
-        source_id, kind=kind, limit=limit, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
-    )
+    _impl.do_relations(source_id, kind=kind, limit=limit, acl=acl_flag(acl), tenant_id=tid, sub_tenant_id=stid)
 
 
 def subgraph(
@@ -222,24 +214,23 @@ def subgraph(
     kind: str | None = typer.Option(None, "--kind", help="Corpus: 'knowledge' (default) or 'memory'."),
     depth: int | None = typer.Option(None, "--depth", help="Hops to traverse (1–10; server default 5)."),
     max_sources: int | None = typer.Option(None, "--max-sources", help="Cap on members returned (server default 200)."),
-    acl: list[str] | None = typer.Option(
-        None,
-        "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). The subgraph contains only items those principals may see. Omit to search everything the API key can reach.",
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Everything connected to one item: its thread, replies, parents, children, links."""
+    """Everything connected to one item: its thread, replies, parents, children, links.
+
+    Omit --acl and HYDRADB_ACL to search everything the API key can reach.
+    """
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_subgraph(
         source_id,
         kind=kind,
         depth=depth,
         max_sources=max_sources,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tid,
         sub_tenant_id=stid,
     )
@@ -293,6 +284,11 @@ def doctor() -> None:
     pairs.append(("Database", cfg.get("tenant_id") or "[dim]Not configured[/dim]"))
     if cfg.get("sub_tenant_id"):
         pairs.append(("Collection", cfg["sub_tenant_id"]))
+    acl = cfg.get("acl")
+    if acl:
+        pairs.append(("ACL", f"{', '.join(acl)} [dim]({cfg['acl_source']})[/dim]"))
+    else:
+        pairs.append(("ACL", "[dim](not set)[/dim]"))
     pairs.append(("Base URL", cfg["base_url"]))
     if reachable is True:
         pairs.append(("Reachable", "[green]yes[/green]"))

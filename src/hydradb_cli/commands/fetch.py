@@ -7,6 +7,7 @@ import typer
 
 from hydradb_cli.commands import _impl
 from hydradb_cli.output import warn_deprecated
+from hydradb_cli.utils.common import ACL_OPTION_HELP, acl_flag
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Inspect stored data — use 'hydradb inspect/list/relations'.")
 
@@ -17,15 +18,11 @@ def content(
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
     mode: str = typer.Option("content", "--mode", help="Fetch mode: 'content', 'url', or 'both'."),
-    acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
 ) -> None:
     """[dim](deprecated)[/dim] Fetch source content — use 'hydradb inspect'."""
     warn_deprecated("fetch content", "inspect")
-    _impl.do_inspect(
-        source_id, mode=mode, acl=list(acl) if acl else None, tenant_id=tenant_id, sub_tenant_id=sub_tenant_id
-    )
+    _impl.do_inspect(source_id, mode=mode, acl=acl_flag(acl), tenant_id=tenant_id, sub_tenant_id=sub_tenant_id)
 
 
 @app.command()
@@ -35,9 +32,7 @@ def sources(
     kind: str | None = typer.Option(None, "--kind", help="Filter by kind: 'knowledge' or 'memories'."),
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
-    acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
 ) -> None:
     """[dim](deprecated)[/dim] List ingested sources — use 'hydradb list'."""
     warn_deprecated("fetch sources", "list")
@@ -48,7 +43,7 @@ def sources(
         kind=canonical_kind,
         page=page,
         page_size=page_size,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )
@@ -63,9 +58,7 @@ def relations(
         None, "--is-memory/--is-knowledge", help="Whether the source is a memory (vs knowledge)."
     ),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
-    acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
-    ),
+    acl: list[str] | None = typer.Option(None, "--acl", help=ACL_OPTION_HELP),
 ) -> None:
     """[dim](deprecated)[/dim] Fetch graph relations — use 'hydradb relations'."""
     warn_deprecated("fetch relations", "relations")
@@ -74,7 +67,7 @@ def relations(
         source_id,
         kind=kind,
         limit=limit,
-        acl=list(acl) if acl else None,
+        acl=acl_flag(acl),
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
     )

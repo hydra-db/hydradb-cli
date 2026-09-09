@@ -7,11 +7,13 @@ import pytest
 import hydradb_cli.config
 from hydradb_cli.config import (
     DEFAULT_BASE_URL,
+    ENV_ACL,
     ENV_API_KEY,
     ENV_BASE_URL,
     ENV_SUB_TENANT_ID,
     ENV_TENANT_ID,
     clear_config,
+    get_acl,
     get_api_key,
     get_base_url,
     get_full_config,
@@ -19,6 +21,7 @@ from hydradb_cli.config import (
     get_tenant_id,
     save_config,
 )
+from hydradb_cli.utils.common import resolve_acl
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +38,7 @@ def clean_config(tmp_path, monkeypatch):
         ENV_TENANT_ID,
         ENV_SUB_TENANT_ID,
         ENV_BASE_URL,
+        ENV_ACL,
         "HYDRADB_TENANT_ID",
         "HYDRADB_SUB_TENANT_ID",
         "HYDRADB_API_URL",
@@ -231,6 +235,55 @@ class TestGetFullConfig:
         cfg = get_full_config()
         assert cfg["api_key_source"] == "none"
         assert cfg["tenant_id_source"] == "none"
+        assert cfg["acl"] is None
+        assert cfg["acl_source"] == "none"
+
+    def test_full_config_includes_acl(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com, bob@corp.com")
+        cfg = get_full_config()
+        assert cfg["acl"] == ["alice@corp.com", "bob@corp.com"]
+        assert cfg["acl_source"] == "env"
+
+
+class TestAclEnv:
+    """HYDRADB_ACL is comma- or whitespace-separated; empty never becomes []."""
+
+    def test_comma_separated(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com,group:google:eng@corp.com")
+        assert get_acl() == ["alice@corp.com", "group:google:eng@corp.com"]
+
+    def test_whitespace_separated(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com bob@corp.com")
+        assert get_acl() == ["alice@corp.com", "bob@corp.com"]
+
+    def test_mixed_comma_and_whitespace(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com, bob@corp.com")
+        assert get_acl() == ["alice@corp.com", "bob@corp.com"]
+
+    def test_unset_is_none_not_empty_list(self, clean_config):
+        assert get_acl() is None
+
+    def test_empty_is_none_not_empty_list(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "  ,  ")
+        assert get_acl() is None
+
+    def test_flag_overrides_env(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com")
+        assert resolve_acl(["bob@corp.com"]) == ["bob@corp.com"]
+
+    def test_env_used_when_flag_omitted(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com, bob@corp.com")
+        assert resolve_acl(None) == ["alice@corp.com", "bob@corp.com"]
+
+    def test_explicit_empty_flag_does_not_use_env(self, clean_config, monkeypatch):
+        monkeypatch.setenv(ENV_ACL, "alice@corp.com")
+        assert resolve_acl([]) is None
+        assert resolve_acl([""]) is None
+        assert resolve_acl(["  ", ""]) is None
+
+    def test_neither_omits_the_field(self, clean_config):
+        assert resolve_acl(None) is None
+        assert resolve_acl([]) is None
 
 
 class TestCorruptConfig:

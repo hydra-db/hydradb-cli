@@ -4,9 +4,14 @@ import sys
 
 import httpx
 
-from hydradb_cli.config import get_api_key, get_base_url, get_collection, get_database, get_graph_collection
+from hydradb_cli.config import get_acl, get_api_key, get_base_url, get_collection, get_database, get_graph_collection
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
 from hydradb_cli.output import print_error, warn_deprecated
+
+# Shared by every command that takes --acl so the omit-means-unrestricted line
+# cannot drift between query/list/inspect/relations/subgraph and the aliases.
+ACL_UNRESTRICTED_HELP = "Omit --acl and HYDRADB_ACL to search everything the API key can reach."
+ACL_OPTION_HELP = f"Principals to answer as, repeatable. Defaults to HYDRADB_ACL. {ACL_UNRESTRICTED_HELP}"
 
 
 def mask_api_key(key: str) -> str:
@@ -35,6 +40,26 @@ def require_tenant_id(tenant_id: str | None = None) -> str:
 def resolve_sub_tenant_id(sub_tenant_id: str | None = None) -> str | None:
     """Get the collection (sub-tenant) scope from argument or config (may be None)."""
     return sub_tenant_id or get_collection()
+
+
+def acl_flag(acl: list[str] | None) -> list[str] | None:
+    """Preserve omitted (None) vs explicit empty ``--acl`` for :func:`resolve_acl`."""
+    return None if acl is None else list(acl)
+
+
+def resolve_acl(acl: list[str] | None = None) -> list[str] | None:
+    """CLI ``--acl`` wins over ``HYDRADB_ACL``. Never returns an empty list.
+
+    ``None`` means the flag was omitted, so ``HYDRADB_ACL`` is used. A list —
+    even empty or only blanks — means ``--acl`` was passed: blanks become
+    unrestricted and the environment is not consulted. The API treats ``[]``
+    as unrestricted (the same as omitting the field), so sending an empty
+    list would not mean "nobody".
+    """
+    if acl is not None:
+        principals = [p.strip() for p in acl if p and p.strip()]
+        return principals or None
+    return get_acl()
 
 
 def resolve_scope_flags(
