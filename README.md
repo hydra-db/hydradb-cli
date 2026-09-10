@@ -53,7 +53,7 @@ The CLI installs four runtime dependencies automatically: `typer`, `httpx`, `ric
 curl -fsSL https://cli.hydradb.com/install | bash
 ```
 
-This downloads the wheel for the latest [GitHub release](https://github.com/usecortex/hydradb-cli/releases) and installs it. The installer uses `pipx` when available, because it keeps CLI tools isolated. If `pipx` is not installed, it falls back to `pip install --user`. Runtime dependencies still resolve from PyPI as usual.
+This downloads the wheel for the latest [GitHub release](https://github.com/hydra-db/hydradb-cli/releases) and installs it. The installer uses `pipx` when available, because it keeps CLI tools isolated. If `pipx` is not installed, it falls back to `pip install --user`. Runtime dependencies still resolve from PyPI as usual.
 
 Install a specific version:
 
@@ -70,7 +70,7 @@ HYDRADB_CLI_FORCE=1 curl -fsSL https://cli.hydradb.com/install | bash
 ### From a GitHub release
 
 ```bash
-pip install https://github.com/usecortex/hydradb-cli/releases/download/v0.2.0/hydradb_cli-0.2.0-py3-none-any.whl
+pip install https://github.com/hydra-db/hydradb-cli/releases/download/v0.2.0/hydradb_cli-0.2.0-py3-none-any.whl
 ```
 
 > **Note:** PyPI releases are paused. `pip install hydradb-cli` still resolves the older `0.1.0`, so use
@@ -79,7 +79,7 @@ pip install https://github.com/usecortex/hydradb-cli/releases/download/v0.2.0/hy
 ### From source
 
 ```bash
-git clone https://github.com/usecortex/hydradb-cli.git
+git clone https://github.com/hydra-db/hydradb-cli.git
 cd hydradb-cli
 pip install .
 ```

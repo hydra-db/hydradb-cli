@@ -27,7 +27,7 @@ Thank you for your interest in contributing to HydraDB CLI! This guide will help
 ### Quick setup
 
 ```bash
-git clone https://github.com/usecortex/hydradb-cli.git
+git clone https://github.com/hydra-db/hydradb-cli.git
 cd hydradb-cli
 make bootstrap
 source .venv/bin/activate
@@ -221,7 +221,7 @@ tests/
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/usecortex/hydradb-cli/issues) to report bugs or request features. Please use the provided templates:
+Use [GitHub Issues](https://github.com/hydra-db/hydradb-cli/issues) to report bugs or request features. Please use the provided templates:
 
 - **Bug Report** -- for unexpected behavior or errors
 - **Feature Request** -- for new functionality ideas
@@ -232,6 +232,6 @@ Before opening a new issue, search existing issues to avoid duplicates.
 
 ## Questions?
 
-If you have questions about contributing, open a [Discussion](https://github.com/usecortex/hydradb-cli/discussions) or reach out to the maintainers.
+If you have questions about contributing, open a [Discussion](https://github.com/hydra-db/hydradb-cli/discussions) or reach out to the maintainers.
 
 Thank you for helping make HydraDB CLI better!
