@@ -35,6 +35,11 @@ from hydradb_cli.utils.common import (
 VALID_MODES = {"fast", "thinking"}
 VALID_OPERATORS = {"or", "and", "phrase"}
 VALID_KINDS = {"knowledge", "memory"}
+VALID_RATINGS = {"positive", "negative", "neutral"}
+# Who is reporting. Validated locally for the same reason --rating is: the
+# server rejects anything else, but only after a round trip, and a typo like
+# "agnet" is worth catching before it costs one.
+VALID_SOURCES = {"user", "agent"}
 VALID_FETCH_MODES = {"content", "url", "both"}
 
 _STATUS_LABELS = {
@@ -69,10 +74,23 @@ def _execute(spinner_msg: str, call: Callable[[], Any]) -> Any:
 # ── query ────────────────────────────────────────────────────────────────────
 
 
+def _feedback_hint(r: dict) -> str:
+    """The line that makes ``hydradb feedback`` reachable.
+
+    Printed verbatim so it can be copied, and printed on an EMPTY result too:
+    a query that found nothing is exactly the case most worth reporting, and
+    it is the one where there are no chunk ids to fall back on.
+    """
+    request_id = r.get("request_id")
+    if not request_id:
+        return ""
+    return f'\n[dim]request_id: {request_id}  ·  rate it: hydradb feedback {request_id} --feedback "..."[/dim]'
+
+
 def _format_query_result(r: dict):
     chunks = r.get("chunks") or []
     if not chunks:
-        return "[dim]No relevant results found.[/dim]"
+        return "[dim]No relevant results found.[/dim]" + _feedback_hint(r)
 
     panels: list[Any] = []
     for i, chunk in enumerate(chunks, 1):
@@ -98,6 +116,10 @@ def _format_query_result(r: dict):
     query_paths = graph.get("query_paths", []) if isinstance(graph, dict) else []
     if query_paths:
         panels.append(Text(f"  Graph: {len(query_paths)} entity path(s) found.", style="dim"))
+
+    hint = _feedback_hint(r)
+    if hint:
+        panels.append(Text.from_markup(hint.lstrip("\n")))
 
     header = Text(f"  Found {len(chunks)} result(s)", style="bold")
     return Group(header, *panels)
@@ -157,6 +179,77 @@ def do_query(
         ),
     )
     print_result(result, _format_query_result)
+
+
+# ── feedback ─────────────────────────────────────────────────────────────────
+
+
+def _format_feedback_result(r: dict):
+    # `recorded: false` means accepted but not durably stored. Reporting that
+    # as success would tell someone their evaluation run was captured when it
+    # was not.
+    if r.get("recorded") is False:
+        return Panel(
+            "[yellow]![/yellow] Feedback accepted but NOT durably stored.\n"
+            "[dim]The server answered without recording it; treat this run as uncaptured.[/dim]",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+
+    lines = [f"[green]✓[/green] Feedback recorded for request {r.get('request_id', '(unknown)')}"]
+    if r.get("feedback_id"):
+        lines.append(f"[cyan]Feedback ID:[/cyan] {r['feedback_id']}")
+    if r.get("created_at"):
+        lines.append(f"[dim]{r['created_at']}[/dim]")
+    return Panel("\n".join(lines), border_style="green", padding=(0, 1))
+
+
+def do_feedback(
+    request_id: str,
+    *,
+    feedback: str | None = None,
+    rating: str | None = None,
+    ground_truth_answer: str | None = None,
+    ground_truth_source_ids: list[str] | None = None,
+    source: str | None = None,
+    tenant_id: str | None = None,
+    sub_tenant_id: str | None = None,
+) -> None:
+    if rating and rating not in VALID_RATINGS:
+        print_error(f"--rating must be one of: {', '.join(sorted(VALID_RATINGS))}. Got '{rating}'.")
+    if source and source not in VALID_SOURCES:
+        print_error(f"--source must be one of: {', '.join(sorted(VALID_SOURCES))}. Got '{source}'.")
+    if not request_id.strip():
+        print_error("REQUEST_ID cannot be empty. Run 'hydradb query' and use the request id it prints.")
+    # The wrapper guards this too, for anyone importing it as a library. But it
+    # reports a refusal as HydraDBClientError(0, ...), and status 0 is this
+    # codebase's marker for a TRANSPORT failure (errors.py uses it only for
+    # connect/timeout), which `handle_api_error` renders as "Connection error:".
+    # Caught here instead, the way --rating and --kind are, so a local refusal
+    # reads as one rather than blaming the network.
+    if not any((value or "").strip() for value in [feedback, ground_truth_answer, *(ground_truth_source_ids or [])]):
+        print_error(
+            "feedback needs something to record: pass --feedback, --ground-truth-answer, or --ground-truth-source-id."
+        )
+
+    tid = require_tenant_id(tenant_id)
+    stid = resolve_sub_tenant_id(sub_tenant_id)
+    wrapper = get_wrapper()
+
+    result = _execute(
+        "Recording feedback...",
+        lambda: wrapper.feedback.submit(
+            request_id=request_id,
+            feedback=feedback,
+            rating=rating,
+            ground_truth_answer=ground_truth_answer,
+            ground_truth_source_ids=ground_truth_source_ids,
+            source=source,
+            database=tid,
+            collection=stid,
+        ),
+    )
+    print_result(result, _format_feedback_result)
 
 
 # ── ingest ───────────────────────────────────────────────────────────────────
