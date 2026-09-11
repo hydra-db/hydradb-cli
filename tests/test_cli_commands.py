@@ -202,6 +202,39 @@ class TestIngest:
         assert "uploaded" in result.output.lower()
         assert w.context.ingest.call_args.kwargs["kind"] == "knowledge"
 
+    def test_ingest_unknown_kind_fails(self):
+        # Anything but "knowledge" used to fall through to the memory path, so
+        # a typo stored the text in the wrong corpus and reported success.
+        _auth()
+        w = _wrapper()
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--kind", "knowlegde", "--text", "notes"])
+        assert result.exit_code != 0
+        assert "--kind must be one of" in result.output
+        w.context.ingest.assert_not_called()
+
+    def test_ingest_empty_kind_fails(self):
+        # An explicit empty value (an unset shell variable) is not the same as
+        # omitting the flag; it must not default to memory.
+        _auth()
+        w = _wrapper()
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", "--kind", "", "--text", "notes"])
+        assert result.exit_code != 0
+        assert "--kind must be one of" in result.output
+        w.context.ingest.assert_not_called()
+
+    def test_ingest_files_with_unknown_kind_fails(self, tmp_path):
+        _auth()
+        f = tmp_path / "a.txt"
+        f.write_text("aaa")
+        w = _wrapper()
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["ingest", str(f), "--kind", "knowlegde"])
+        assert result.exit_code != 0
+        assert "--kind must be one of" in result.output
+        w.context.ingest_many.assert_not_called()
+
     def test_ingest_files_loops(self, tmp_path):
         _auth()
         f1 = tmp_path / "a.txt"
