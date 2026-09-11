@@ -162,6 +162,26 @@ class TestQuery:
         assert result.exit_code == 0
         assert w.context.query.call_args.kwargs["titles"] == ["Smith, John", "Q3 Roadmap.md"]
 
+    def test_query_normalizes_and_deduplicates_titles(self):
+        _auth()
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(
+                app,
+                ["query", "ownership", "--title", "  Q3 Roadmap.md  ", "--title", "q3 roadmap.MD"],
+            )
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["titles"] == ["Q3 Roadmap.md"]
+
+    def test_query_rejects_blank_title(self):
+        _auth()
+        w = _wrapper()
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["query", "ownership", "--title", "   "])
+        assert result.exit_code != 0
+        assert "--title cannot be empty or whitespace-only" in result.output
+        w.context.query.assert_not_called()
+
     def test_query_empty_fails(self):
         _auth()
         with _patch_wrapper(_wrapper()):

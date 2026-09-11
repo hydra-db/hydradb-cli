@@ -147,9 +147,6 @@ def do_query(
             if key not in seen_titles:
                 seen_titles.add(key)
                 clean_titles.append(title)
-        if len(clean_titles) > 200:
-            print_error(f"--title may be repeated at most 200 times, got {len(clean_titles)} unique titles.")
-
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
