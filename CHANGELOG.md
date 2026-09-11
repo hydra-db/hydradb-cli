@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Exact multi-title query filtering.** Repeat `hydradb query --title "…"` to resolve one or more complete document titles to source IDs before the normal semantic or keyword query runs. Matching is case-insensitive, punctuation such as commas is preserved, and combining titles with other server-side query filters narrows rather than widens the search.
+
 - **`hydradb graph` — full Cypher over graph collections you own (BYOG).** HydraDB's graph database offering had no CLI surface at all: `query`, `ingest` and the rest address the memory and knowledge corpora, and the property graphs users model and own end to end were reachable only through the raw API. This adds `graph query`, `graph collections`, `graph load`, `graph database create/delete` and `graph collection delete`. Everything existing is untouched — the two stores are separate, and nothing crosses between them.
 
   `graph query` takes parameters through `--param k=v` (values parse as JSON when they can, so `--param n=3` is the number 3) or `--params-json`. `--output json` prints the rows verbatim, so `hydradb graph query ... | jq '.[].name'` works without unwrapping an envelope.

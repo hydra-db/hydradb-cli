@@ -225,12 +225,14 @@ Retrieve knowledge or memories — the single entry point for search.
 | `--recency-bias` | Preference for newer content (`0.0`–`1.0`) |
 | `--graph-context` / `--no-graph-context` | Include knowledge graph relations |
 | `--context` | Additional context to guide retrieval |
+| `--title` | Exact document title to search inside; repeat the flag for multiple titles |
 
 ```bash
 hydradb query "What did the team say about pricing?"
 hydradb query "contract terms" --kind knowledge --mode thinking --max-results 20
 hydradb query "What does the user prefer?" --kind memory
 hydradb query "pricing AND enterprise" --operator and
+hydradb query "Who owns the rollout?" --title "Q3 Roadmap.md" --title "Smith, John"
 ```
 
 ---

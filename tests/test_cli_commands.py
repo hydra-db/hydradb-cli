@@ -151,6 +151,17 @@ class TestQuery:
         assert result.exit_code == 0
         assert "chunks" in json.loads(result.output)
 
+    def test_query_forwards_repeatable_exact_titles(self):
+        _auth()
+        w = _wrapper(**{"context.query": {"chunks": []}})
+        with _patch_wrapper(w):
+            result = runner.invoke(
+                app,
+                ["query", "ownership", "--title", "Smith, John", "--title", "Q3 Roadmap.md"],
+            )
+        assert result.exit_code == 0
+        assert w.context.query.call_args.kwargs["titles"] == ["Smith, John", "Q3 Roadmap.md"]
+
     def test_query_empty_fails(self):
         _auth()
         with _patch_wrapper(_wrapper()):

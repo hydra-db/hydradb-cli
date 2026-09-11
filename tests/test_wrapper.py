@@ -90,6 +90,29 @@ class TestQuery:
         assert body["database"] == "db_test"
         assert body["collection"] == "col_test"
 
+    def test_query_with_titles_uses_raw_v2_body(self, monkeypatch):
+        captured = {}
+        w = HydraDB(token="x", base_url="http://test.local", database="db_test", collection="col_test")
+
+        def post(url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"chunks": []}, "meta": {}},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx, "post", post)
+        result = w.context.query(query="q", titles=["Smith, John", "Q3 Roadmap.md"])
+
+        assert result == {"chunks": []}
+        assert captured["url"] == "http://test.local/query"
+        assert captured["json"]["titles"] == ["Smith, John", "Q3 Roadmap.md"]
+        assert captured["json"]["database"] == "db_test"
+        assert captured["json"]["collection"] == "col_test"
+        assert captured["headers"]["API-Version"] == "2"
+
 
 class TestIngest:
     def test_ingest_memory_encodes_memories(self):

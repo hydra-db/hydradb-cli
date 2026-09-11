@@ -114,6 +114,7 @@ def do_query(
     recency_bias: float | None = None,
     graph_context: bool | None = None,
     additional_context: str | None = None,
+    titles: list[str] | None = None,
     acl: list[str] | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
@@ -134,6 +135,21 @@ def do_query(
     if max_results < 1 or max_results > 50:
         print_error(f"--max-results must be between 1 and 50, got {max_results}.")
 
+    clean_titles: list[str] | None = None
+    if titles:
+        clean_titles = []
+        seen_titles: set[str] = set()
+        for value in titles:
+            title = value.strip()
+            if not title:
+                print_error("--title cannot be empty or whitespace-only.")
+            key = title.lower()
+            if key not in seen_titles:
+                seen_titles.add(key)
+                clean_titles.append(title)
+        if len(clean_titles) > 200:
+            print_error(f"--title may be repeated at most 200 times, got {len(clean_titles)} unique titles.")
+
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
@@ -151,6 +167,7 @@ def do_query(
             recency_bias=recency_bias,
             graph_context=graph_context,
             additional_context=additional_context,
+            titles=clean_titles,
             acl=acl,
             database=tid,
             collection=stid,
