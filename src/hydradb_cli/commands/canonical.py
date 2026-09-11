@@ -57,6 +57,11 @@ def query(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
+    titles: list[str] | None = typer.Option(
+        None,
+        "--title",
+        help="Exact document title to search inside; repeat for multiple titles.",
+    ),
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
@@ -79,6 +84,7 @@ def query(
         recency_bias=recency_bias,
         graph_context=graph_context,
         additional_context=additional_context,
+        titles=list(titles) if titles else None,
         acl=list(acl) if acl else None,
         tenant_id=tid,
         sub_tenant_id=stid,

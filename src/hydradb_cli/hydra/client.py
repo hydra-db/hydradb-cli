@@ -236,6 +236,7 @@ class _Context(_Resource):
         graph_context: bool | None = None,
         additional_context: str | None = None,
         query_by: str | None = None,
+        titles: list[str] | None = None,
         acl: list[str] | None = None,
         database: str | None = None,
         collection: str | None = None,
@@ -244,6 +245,37 @@ class _Context(_Resource):
 
         Maps to the SDK's top-level ``client.query``; ``kind`` becomes ``type``.
         """
+        database_name = self._w._require_database(database)
+        collection_name = self._w._resolve_collection(collection)
+
+        # hydradb-sdk 2.1.4 predates the titles field and would reject the
+        # unknown keyword before sending a request. Use the wrapper's equivalent
+        # v2 JSON transport only for title-filtered queries until the generated
+        # SDK exposes it; ordinary queries remain on the SDK path.
+        if titles:
+            body = {
+                key: value
+                for key, value in {
+                    "type": kind,
+                    "query": query,
+                    "operator": operator,
+                    "max_results": max_results,
+                    "mode": mode,
+                    "alpha": alpha,
+                    "recency_bias": recency_bias,
+                    "graph_context": graph_context,
+                    "additional_context": additional_context,
+                    "query_by": query_by,
+                    "titles": titles,
+                    "acl": acl,
+                    "database": database_name,
+                    "collection": collection_name,
+                }.items()
+                if value is not None
+            }
+            result = self._w._raw_post("/query", json_body=body)
+            return result if isinstance(result, dict) else {}
+
         resp = self._invoke(
             self._w._sdk.query,
             type=kind,
@@ -257,8 +289,8 @@ class _Context(_Resource):
             additional_context=additional_context,
             query_by=query_by,
             acl=acl,
-            database=self._w._require_database(database),
-            collection=self._w._resolve_collection(collection),
+            database=database_name,
+            collection=collection_name,
         )
         data = _unwrap(resp)
         # Carry the request id into the payload rather than dropping it with
