@@ -575,3 +575,143 @@ class TestDeleteCollection:
         with pytest.raises(HydraDBClientError) as exc:
             self._wrapper().databases.delete_collection(collection="support")
         assert exc.value.status_code == 0
+
+
+class TestFeedback:
+    """``POST /feedback`` — the raw path, and the guards in front of it."""
+
+    @staticmethod
+    def _submit(**kwargs):
+        """Run ``feedback.submit`` against a mock and return (body, result)."""
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["request"] = request
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "recorded": True,
+                        "feedback_id": "fb_1",
+                        "request_id": seen["body"].get("request_id"),
+                    },
+                    "success": True,
+                    "meta": {"request_id": "outer"},
+                },
+            )
+
+        w = _wrapper_with_response({})
+        transport = httpx.MockTransport(handler)
+        with httpx.Client(transport=transport) as client:
+            original = httpx.post
+
+            def fake_post(url, **kw):
+                kw.pop("timeout", None)
+                return client.post(url, **kw)
+
+            httpx.post = fake_post
+            try:
+                result = w.feedback.submit(**kwargs)
+            finally:
+                httpx.post = original
+        return seen, result
+
+    def test_submits_over_the_raw_path_and_unwraps(self):
+        seen, result = self._submit(request_id="r1", feedback="useful")
+        assert seen["request"].url.path == "/feedback"
+        # CONTRACT §2 rule 6 — the raw path must send the version header too.
+        assert seen["request"].headers["API-Version"] == "2"
+        assert result == {"recorded": True, "feedback_id": "fb_1", "request_id": "r1"}
+
+    def test_request_id_actually_reaches_the_wire(self):
+        """The whole point of the raw path.
+
+        The SDK's generated model is a union of ``{feedback}`` and
+        ``{ground_truth}``; neither branch declares ``request_id``, which is the
+        only key the endpoint correlates on.
+        """
+        seen, _ = self._submit(request_id="r1", feedback="useful")
+        assert seen["body"]["request_id"] == "r1"
+
+    def test_an_answer_and_source_ids_travel_together(self):
+        """Also impossible through the SDK: ``ground_truth`` is itself a union
+        of ``{answer}`` and ``{source_ids}``, so one branch drops the other."""
+        seen, _ = self._submit(
+            request_id="r1",
+            ground_truth_answer="42",
+            ground_truth_source_ids=["a", "b"],
+        )
+        assert seen["body"]["ground_truth"] == {"answer": "42", "source_ids": ["a", "b"]}
+
+    def test_source_ids_are_trimmed_and_de_duplicated(self):
+        """They are SCORED: the same document twice would weight one piece of
+        evidence as two."""
+        seen, _ = self._submit(request_id="r1", ground_truth_source_ids=[" a ", "a", "b", "", "  "])
+        assert seen["body"]["ground_truth"]["source_ids"] == ["a", "b"]
+
+    def test_rejects_a_submission_with_no_signal(self):
+        with pytest.raises(HydraDBClientError) as exc:
+            self._submit(request_id="r1")
+        assert "--feedback" in str(exc.value)
+
+    def test_rejects_a_blank_request_id(self):
+        with pytest.raises(HydraDBClientError) as exc:
+            self._submit(request_id="   ", feedback="useful")
+        assert "request_id" in str(exc.value)
+
+    def test_caps_ids_only_after_de_duplication(self):
+        """150 ids collapsing to 80 distinct is a request the server accepts, so
+        refusing it locally would be worse than the round trip this avoids."""
+        seen, _ = self._submit(request_id="r1", ground_truth_source_ids=[f"s{i % 80}" for i in range(150)])
+        assert len(seen["body"]["ground_truth"]["source_ids"]) == 80
+
+        with pytest.raises(HydraDBClientError) as exc:
+            self._submit(request_id="r1", ground_truth_source_ids=[f"s{i}" for i in range(101)])
+        assert "100" in str(exc.value)
+
+    def test_source_defaults_to_user_not_the_servers_default(self):
+        """A person at a terminal is a user; the MCP client says 'agent'
+        because its caller is always a model. The row records which."""
+        seen, _ = self._submit(request_id="r1", feedback="useful")
+        assert seen["body"]["source"] == "user"
+
+        seen, _ = self._submit(request_id="r1", feedback="useful", source="agent")
+        assert seen["body"]["source"] == "agent"
+
+
+class TestQueryRequestId:
+    """``context.query`` has to surface ``meta.request_id``.
+
+    ``_unwrap`` returns ``.data`` and drops ``meta``, so without this the id is
+    gone before any caller sees it and ``hydradb feedback`` has nothing to
+    attach to — the feedback command would ship unusable.
+    """
+
+    def test_query_carries_the_request_id_into_its_payload(self):
+        w = _wrapper_with_response(
+            {
+                "data": {"chunks": [{"chunk_content": "x"}]},
+                "success": True,
+                "meta": {"request_id": "rid-123"},
+            }
+        )
+        result = w.context.query(query="hello")
+        assert result["request_id"] == "rid-123"
+        assert result["chunks"] == [{"chunk_content": "x"}]
+
+    def test_query_without_a_request_id_gains_no_key(self):
+        """Absent is absent — never invent the one key /feedback correlates on."""
+        w = _wrapper_with_response({"data": {"chunks": []}, "success": True, "meta": {}})
+        assert "request_id" not in w.context.query(query="hello")
+
+    def test_query_never_overwrites_a_payload_request_id(self):
+        """If the server ever puts one in `data`, that one is authoritative."""
+        w = _wrapper_with_response(
+            {
+                "data": {"chunks": [], "request_id": "from-data"},
+                "success": True,
+                "meta": {"request_id": "from-meta"},
+            }
+        )
+        assert w.context.query(query="hello")["request_id"] == "from-data"

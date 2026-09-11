@@ -84,6 +84,26 @@ def _unwrap_payload(body: Any) -> Any:
     return body if body is not None else {}
 
 
+def _request_id_of(obj: Any) -> str | None:
+    """The ``meta.request_id`` of an SDK envelope, if it carries one.
+
+    ``_unwrap`` returns ``.data`` and drops ``meta``, which is where the request
+    id lives. That id is the ONLY key ``POST /feedback`` correlates on, so a
+    query that does not surface it leaves ``hydradb feedback`` with nothing to
+    attach to. Read defensively: the SDK hands back a pydantic model, but the
+    hand-rolled path parses plain JSON.
+    """
+    meta = getattr(obj, "meta", None)
+    if meta is None and isinstance(obj, dict):
+        meta = obj.get("meta")
+    if meta is None:
+        return None
+    rid = getattr(meta, "request_id", None)
+    if rid is None and isinstance(meta, dict):
+        rid = meta.get("request_id")
+    return rid if isinstance(rid, str) and rid else None
+
+
 def _bool_str(value: bool | None) -> str | None:
     """The SDK's multipart ``upsert`` field is a string; map bools to it."""
     if value is None:
@@ -272,7 +292,17 @@ class _Context(_Resource):
             database=database_name,
             collection=collection_name,
         )
-        return _unwrap(resp)
+        data = _unwrap(resp)
+        # Carry the request id into the payload rather than dropping it with
+        # the rest of `meta`. It is additive -- /query's data has no
+        # `request_id` of its own -- so the documented `--output json` shape
+        # gains a key and loses none, and `hydradb feedback` becomes reachable
+        # by piping it. Without this the feedback command is unusable: nothing
+        # else in the response identifies the query it would be about.
+        request_id = _request_id_of(resp)
+        if request_id and isinstance(data, dict) and "request_id" not in data:
+            data["request_id"] = request_id
+        return data
 
     def ingest(
         self,
@@ -641,6 +671,118 @@ class _Graph(_Resource):
         return result if isinstance(result, dict) else {}
 
 
+class _Feedback(_Resource):
+    """``POST /feedback`` — was this query's answer any good?
+
+    Hand-rolled rather than routed through ``sdk.feedback.submit`` (CONTRACT §2
+    rule 7). The SDK *has* the resource, but its generated model cannot express
+    a valid request: ``submit`` takes a union of ``{feedback}`` and
+    ``{ground_truth}``, and ``ground_truth`` is itself a union of ``{answer}``
+    and ``{source_ids}``. Both unions are undiscriminated and dropped every
+    field their branches share -- ``request_id`` included -- so the correlation
+    key the endpoint exists for is not on either model.
+
+    It does happen to work today: the models are ``extra="allow"``, so
+    undeclared fields ride along and reach the wire (verified against staging).
+    But that means every field this endpoint needs travels as an accident of
+    pydantic config, at two levels of nesting, and sending an answer together
+    with source ids means picking one branch and smuggling the other past it.
+    A generated model that cannot name its own required field is equivalent to
+    no model. When the spec is fixed so the branches keep their siblings, this
+    becomes a one-file change back to the SDK.
+    """
+
+    #: The server de-duplicates before applying its own 100-id cap, so the cap
+    #: is checked HERE, after our own de-duplication -- 150 ids collapsing to
+    #: 80 is a valid request and must not be refused locally.
+    MAX_GROUND_TRUTH_SOURCE_IDS = 100
+
+    def submit(
+        self,
+        *,
+        request_id: str,
+        feedback: str | None = None,
+        rating: str | None = None,
+        ground_truth_answer: str | None = None,
+        ground_truth_source_ids: list[str] | None = None,
+        source: str | None = None,
+        metadata: dict | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> dict:
+        """Record feedback about a query that already ran.
+
+        ``request_id`` comes from that query's ``meta.request_id``, which
+        ``context.query`` surfaces on its result. Nothing else about the
+        original query is re-sent, so nothing has to be trusted from here.
+        """
+        rid = (request_id or "").strip()
+        if not rid:
+            raise HydraDBClientError(
+                0,
+                "feedback needs the request_id of the query it is about. "
+                "Run 'hydradb query' and use the request id it prints.",
+            )
+
+        text = (feedback or "").strip()
+
+        # Trimmed and de-duplicated because they are SCORED: the same document
+        # listed twice would weight one piece of evidence as two.
+        ids: list[str] = []
+        seen: set[str] = set()
+        for value in ground_truth_source_ids or []:
+            candidate = (value or "").strip()
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                ids.append(candidate)
+
+        answer = (ground_truth_answer or "").strip()
+
+        if not text and not answer and not ids:
+            raise HydraDBClientError(
+                0,
+                "feedback needs something to record: pass --feedback, "
+                "--ground-truth-answer, or --ground-truth-source-id. The server "
+                "refuses an empty submission too, but only after a round trip.",
+            )
+
+        if len(ids) > self.MAX_GROUND_TRUTH_SOURCE_IDS:
+            raise HydraDBClientError(
+                0,
+                f"at most {self.MAX_GROUND_TRUTH_SOURCE_IDS} distinct ground-truth "
+                f"source ids, got {len(ids)}. A question answered by that many "
+                "documents is not specific enough to grade retrieval against.",
+            )
+
+        ground_truth: dict = {}
+        if answer:
+            ground_truth["answer"] = answer
+        if ids:
+            ground_truth["source_ids"] = ids
+
+        body: dict = {
+            "request_id": rid,
+            # The server defaults this to "user"; say it explicitly so the row
+            # records who it came from rather than inheriting a default that
+            # could change.
+            "source": source or "user",
+            "database": self._w._require_database(database),
+        }
+        scope = self._w._resolve_collection(collection)
+        if scope:
+            body["collection"] = scope
+        if text:
+            body["feedback"] = text
+        if rating:
+            body["rating"] = rating
+        if ground_truth:
+            body["ground_truth"] = ground_truth
+        if metadata:
+            body["metadata"] = metadata
+
+        return self._w._raw_post("/feedback", json_body=body)
+
+
 class _Connectors(_Resource):
     """Managed integrations that sync external sources into a database.
 
@@ -841,6 +983,7 @@ class HydraDB:
         self.databases = _Databases(self)
         self.context = _Context(self)
         self.graph = _Graph(self)
+        self.feedback = _Feedback(self)
         self.connectors = _Connectors(self)
 
     def _raw_get(self, path: str, *, params: dict | None = None) -> Any:
@@ -882,11 +1025,15 @@ class HydraDB:
             return data if data is not None else {}
         return body if body is not None else {}
 
-    def _raw_post(self, path: str, *, json_body: dict) -> Any:
-        """POST JSON for a v2 field the generated SDK does not expose yet."""
+    def _raw_post(self, path: str, *, json_body: Any) -> Any:
+        """POST an endpoint the SDK cannot express, with the same error contract.
+
+        The sibling of :meth:`_raw_get` (CONTRACT §2 rule 7). Same auth and
+        ``API-Version: 2`` headers, same shape-based unwrapping, same
+        translated error type, so a caller cannot tell it from an SDK call.
+        """
         headers = {
             "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
             "API-Version": "2",
         }
         try:
@@ -906,6 +1053,7 @@ class HydraDB:
 
         if response.is_error:
             raise HydraDBClientError(response.status_code, _stringify_body(body))
+
         return _unwrap_payload(body)
 
     def _require_database(self, database: str | None) -> str:

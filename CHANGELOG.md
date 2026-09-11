@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`hydradb feedback` — report whether a query's results were actually useful.** `POST /feedback` had no CLI surface. It correlates on one key, the `request_id` from the query's `meta`, and nothing else about the original query is re-sent, so nothing has to be trusted from the client.
+
+  That key was unreachable: the wrapper's `_unwrap` returns `.data` and drops `meta`, so a successful query discarded its own request id before any caller saw it. `query` now carries it into the payload — additive, since `/query`'s data has no `request_id` of its own, so the documented `--output json` shape gains a key and loses none — and prints it with a copy-pasteable `hydradb feedback` line. It prints on an EMPTY result too: a query that found nothing is the case most worth reporting, and the one with no chunk ids to fall back on.
+
+  Ground truth (`--ground-truth-answer`, repeatable `--ground-truth-source-id`) is accepted alongside prose because it is machine-checkable. Source ids are trimmed and de-duplicated before sending, since they are scored and the same document listed twice would weight one piece of evidence as two. `--source` defaults to `user` rather than `agent`: a person at a terminal is a user, and the two populations are separated at write time.
+
+  Hand-rolled rather than routed through `sdk.feedback.submit` (CONTRACT §2 rule 7). The SDK *has* the resource, but `submit` takes an undiscriminated union of `{feedback}` and `{ground_truth}`, and `ground_truth` is itself a union of `{answer}` and `{source_ids}`. Both unions dropped every field their branches share, `request_id` included. It happens to work today only because the models are `extra="allow"`, so the endpoint's required field travels as an accident of pydantic config at two levels of nesting — and sending an answer together with source ids means picking one branch and smuggling the other past it. When the spec is fixed, this is a one-file change back to the SDK.
+
 - **Exact multi-title query filtering.** Repeat `hydradb query --title "…"` to resolve one or more complete document titles to source IDs before the normal semantic or keyword query runs. Matching is case-insensitive, punctuation such as commas is preserved, and combining titles with other server-side query filters narrows rather than widens the search.
 
 - **`hydradb graph` — full Cypher over graph collections you own (BYOG).** HydraDB's graph database offering had no CLI surface at all: `query`, `ingest` and the rest address the memory and knowledge corpora, and the property graphs users model and own end to end were reachable only through the raw API. This adds `graph query`, `graph collections`, `graph load`, `graph database create/delete` and `graph collection delete`. Everything existing is untouched — the two stores are separate, and nothing crosses between them.
