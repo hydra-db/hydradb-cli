@@ -36,6 +36,10 @@ VALID_MODES = {"fast", "thinking"}
 VALID_OPERATORS = {"or", "and", "phrase"}
 VALID_KINDS = {"knowledge", "memory"}
 VALID_RATINGS = {"positive", "negative", "neutral"}
+# Who is reporting. Validated locally for the same reason --rating is: the
+# server rejects anything else, but only after a round trip, and a typo like
+# "agnet" is worth catching before it costs one.
+VALID_SOURCES = {"user", "agent"}
 VALID_FETCH_MODES = {"content", "url", "both"}
 
 _STATUS_LABELS = {
@@ -213,6 +217,20 @@ def do_feedback(
 ) -> None:
     if rating and rating not in VALID_RATINGS:
         print_error(f"--rating must be one of: {', '.join(sorted(VALID_RATINGS))}. Got '{rating}'.")
+    if source and source not in VALID_SOURCES:
+        print_error(f"--source must be one of: {', '.join(sorted(VALID_SOURCES))}. Got '{source}'.")
+    if not request_id.strip():
+        print_error("REQUEST_ID cannot be empty. Run 'hydradb query' and use the request id it prints.")
+    # The wrapper guards this too, for anyone importing it as a library. But it
+    # reports a refusal as HydraDBClientError(0, ...), and status 0 is this
+    # codebase's marker for a TRANSPORT failure (errors.py uses it only for
+    # connect/timeout), which `handle_api_error` renders as "Connection error:".
+    # Caught here instead, the way --rating and --kind are, so a local refusal
+    # reads as one rather than blaming the network.
+    if not any((value or "").strip() for value in [feedback, ground_truth_answer, *(ground_truth_source_ids or [])]):
+        print_error(
+            "feedback needs something to record: pass --feedback, --ground-truth-answer, or --ground-truth-source-id."
+        )
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)

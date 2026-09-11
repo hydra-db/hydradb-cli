@@ -1082,3 +1082,108 @@ def test_delete_collection_reports_async_cleanup():
     out = _ANSI_RE.sub("", result.output).lower()
     assert "scheduled for deletion" in out
     assert "background" in out
+
+
+class TestFeedbackCommand:
+    """The public ``hydradb feedback`` surface.
+
+    The wrapper tests call ``feedback.submit`` directly, which leaves the
+    command itself unproven: registration, option-to-wrapper mapping, local
+    validation, both renderings and the exit code can all regress while those
+    stay green.
+    """
+
+    def test_registered_with_its_flags(self):
+        text = _help_text("feedback")
+        for flag in ("--feedback", "--rating", "--ground-truth-answer", "--ground-truth-source-id", "--source"):
+            assert flag in text, flag
+
+    def test_maps_every_option_onto_the_wrapper(self):
+        _auth()
+        w = _wrapper(**{"feedback.submit": {"recorded": True, "feedback_id": "fb_1", "request_id": "r1"}})
+        with _patch_wrapper(w):
+            result = runner.invoke(
+                app,
+                [
+                    "feedback",
+                    "r1",
+                    "--feedback",
+                    "not the current policy",
+                    "--rating",
+                    "negative",
+                    "--ground-truth-answer",
+                    "Net 30",
+                    "--ground-truth-source-id",
+                    "src_a",
+                    "--ground-truth-source-id",
+                    "src_b",
+                    "--source",
+                    "agent",
+                ],
+            )
+        assert result.exit_code == 0
+        kwargs = w.feedback.submit.call_args.kwargs
+        assert kwargs["request_id"] == "r1"
+        assert kwargs["feedback"] == "not the current policy"
+        assert kwargs["rating"] == "negative"
+        assert kwargs["ground_truth_answer"] == "Net 30"
+        assert kwargs["ground_truth_source_ids"] == ["src_a", "src_b"]
+        assert kwargs["source"] == "agent"
+
+    def test_human_output_shows_the_feedback_id(self):
+        _auth()
+        w = _wrapper(**{"feedback.submit": {"recorded": True, "feedback_id": "fb_42", "request_id": "r1"}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["feedback", "r1", "--feedback", "good"])
+        assert result.exit_code == 0
+        assert "fb_42" in result.output
+
+    def test_json_output_is_the_payload(self):
+        _auth()
+        w = _wrapper(**{"feedback.submit": {"recorded": True, "feedback_id": "fb_1", "request_id": "r1"}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["--output", "json", "feedback", "r1", "--feedback", "good"])
+        assert result.exit_code == 0
+        assert json.loads(result.output)["feedback_id"] == "fb_1"
+
+    # `recorded: false` means accepted but not durably stored. Rendering that as
+    # success would tell an evaluation run it was captured when it was not.
+    def test_not_durably_stored_is_not_reported_as_success(self):
+        _auth()
+        w = _wrapper(**{"feedback.submit": {"recorded": False, "request_id": "r1"}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["feedback", "r1", "--feedback", "good"])
+        assert "NOT durably stored" in result.output
+        assert "✓" not in result.output
+
+    def test_rejects_an_invalid_rating_before_calling_out(self):
+        _auth()
+        w = _wrapper(**{"feedback.submit": {}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["feedback", "r1", "--feedback", "x", "--rating", "great"])
+        assert result.exit_code == 1
+        assert "--rating must be one of" in result.output
+        w.feedback.submit.assert_not_called()
+
+    def test_rejects_an_invalid_source_before_calling_out(self):
+        """A typo like 'agnet' should cost a message, not a round trip."""
+        _auth()
+        w = _wrapper(**{"feedback.submit": {}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["feedback", "r1", "--feedback", "x", "--source", "agnet"])
+        assert result.exit_code == 1
+        assert "--source must be one of" in result.output
+        w.feedback.submit.assert_not_called()
+
+    # Status 0 is this codebase's marker for a TRANSPORT failure, so a wrapper
+    # refusal raised with it renders as "Connection error:". A local refusal
+    # must not blame the network.
+    def test_an_empty_submission_reads_as_a_local_refusal(self):
+        _auth()
+        w = _wrapper(**{"feedback.submit": {}})
+        with _patch_wrapper(w):
+            result = runner.invoke(app, ["feedback", "r1"])
+        assert result.exit_code == 1
+        assert "feedback needs something to record" in result.output
+        assert "Connection error" not in result.output
+        w.feedback.submit.assert_not_called()
