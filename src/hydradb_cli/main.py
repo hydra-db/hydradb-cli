@@ -94,6 +94,7 @@ app.command(name="relations", help="Explore knowledge-graph relations.")(canonic
 app.command(name="subgraph", help="Everything connected to one item: thread, replies, hierarchy, links.")(
     canonical.subgraph
 )
+app.command(name="feedback", help="Report whether a query's results were useful.")(canonical.feedback)
 app.command(name="verify", help="Check per-source ingestion status.")(canonical.verify)
 app.command(name="doctor", help="Check config and API reachability.")(canonical.doctor)
 app.add_typer(canonical.database_app, name="database", help="[bold]Database[/bold] management.")

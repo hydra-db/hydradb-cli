@@ -233,6 +233,44 @@ hydradb query "What does the user prefer?" --kind memory
 hydradb query "pricing AND enterprise" --operator and
 ```
 
+Every query prints a `request_id`. That is the only key `feedback` correlates
+on, so keep it if you intend to rate the answer:
+
+```bash
+hydradb --output json query "contract terms" | jq -r .request_id
+```
+
+---
+
+### feedback
+
+Report whether a query's results were actually useful. It correlates on the
+`request_id` that query printed — nothing else about the original query is
+re-sent.
+
+| Flag | Meaning |
+|---|---|
+| `--feedback` / `-f` | What was right or wrong about the results |
+| `--rating` | Overall verdict: `positive`, `negative`, `neutral` |
+| `--ground-truth-answer` | The answer the query *should* have produced |
+| `--ground-truth-source-id` | A source id that should have been retrieved (repeatable) |
+| `--source` | Who is reporting: `user` (default), or `agent` for scripted runs |
+
+Ground truth is worth far more than prose: it is machine-checkable, so it can
+be scored automatically rather than read by a person.
+
+```bash
+hydradb feedback 8f1c0e8a-... --rating positive
+hydradb feedback 8f1c0e8a-... -f "returned the 2023 policy, not the current one" --rating negative
+hydradb feedback 8f1c0e8a-... \
+  --ground-truth-answer "Net 30, per the 2026 MSA" \
+  --ground-truth-source-id src_abc --ground-truth-source-id src_def
+```
+
+A submission needs at least one of `--feedback`, `--ground-truth-answer` or
+`--ground-truth-source-id`; an empty one is refused locally rather than after a
+round trip.
+
 ---
 
 ### ingest

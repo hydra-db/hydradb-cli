@@ -85,6 +85,42 @@ def query(
     )
 
 
+def feedback(
+    request_id: str = typer.Argument(metavar="REQUEST_ID", help="The request id printed by 'hydradb query'."),
+    feedback_text: str | None = typer.Option(
+        None, "--feedback", "-f", help="What was right or wrong about the results."
+    ),
+    rating: str | None = typer.Option(None, "--rating", help="Overall verdict: 'positive', 'negative', or 'neutral'."),
+    ground_truth_answer: str | None = typer.Option(
+        None, "--ground-truth-answer", help="The answer the query SHOULD have produced."
+    ),
+    ground_truth_source_id: list[str] | None = typer.Option(
+        None,
+        "--ground-truth-source-id",
+        help="A source id that should have been retrieved, repeatable. Scored as a retrieval judgement.",
+    ),
+    source: str | None = typer.Option(
+        None, "--source", help="Who is reporting: 'user' (default) or 'agent' for scripted runs."
+    ),
+    database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
+    collection: str | None = typer.Option(None, "--collection", help="Collection."),
+    tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
+    sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
+) -> None:
+    """Report whether a query's results were actually useful."""
+    tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
+    _impl.do_feedback(
+        request_id,
+        feedback=feedback_text,
+        rating=rating,
+        ground_truth_answer=ground_truth_answer,
+        ground_truth_source_ids=list(ground_truth_source_id) if ground_truth_source_id else None,
+        source=source,
+        tenant_id=tid,
+        sub_tenant_id=stid,
+    )
+
+
 def ingest(
     files: list[str] | None = typer.Argument(None, help="Knowledge file path(s) to ingest."),
     kind: str | None = typer.Option(None, "--kind", help="Kind to ingest: 'memory' (default) or 'knowledge'."),
