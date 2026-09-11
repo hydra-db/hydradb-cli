@@ -20,6 +20,14 @@
 
 - **`HYDRADB_GRAPH_COLLECTION`** sets the default graph collection (default `default`). It deliberately does not fall back to `HYDRADB_COLLECTION`: a context collection names a memory/knowledge partition and means nothing to a graph, so inheriting it would silently point Cypher at a collection you never chose.
 
+### Fixed
+
+- **`ingest` rejects an unknown `--kind`** instead of storing the text as a memory.
+  Only `knowledge` was matched, so `--kind knowlegde`, `--kind Knowledge` or an empty
+  `--kind ""` fell through to the memory path, sent `type=memory`, and printed
+  `✓ Memory added`. It now fails with the same `--kind must be one of: knowledge, memory`
+  error that `query`, `list` and `delete` already give.
+
 ### Internal
 
 - `HydraDB.graph` is a hand-rolled `httpx` path rather than an SDK call: the pinned `hydradb-sdk==2.1.2` exposes `context`, `databases`, `connectors` and `webhooks` and has no `byog` resource, so those endpoints are unreachable through it. It reuses the wrapper's existing envelope unwrapping and error translation and raises the same `HydraDBClientError`, so `handle_api_error` treats a BYOG failure exactly like an SDK one. When the SDK grows a `byog` resource, that one class is reimplemented over it and no caller changes. The exact SDK pin (CONTRACT S2 rule 1) is unaffected — there is no generated name to be insulated from yet.

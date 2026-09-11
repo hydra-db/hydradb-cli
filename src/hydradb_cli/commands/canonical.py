@@ -102,6 +102,13 @@ def ingest(
 ) -> None:
     """Ingest a memory, knowledge text, or knowledge file(s)."""
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
+    # Only `knowledge` is matched below; anything else used to fall through to
+    # the memory path, so a typo like `--kind knowlegde` stored the text as a
+    # memory and reported success. Reject it up front, the way delete does.
+    # `is not None`, not truthiness: `--kind ""` (an unset shell variable) must
+    # be rejected too, and only omitting the flag keeps the memory default.
+    if kind is not None and kind not in _impl.VALID_KINDS:
+        print_error(f"--kind must be one of: {', '.join(sorted(_impl.VALID_KINDS))}. Got '{kind}'.")
     if files:
         # Files are always knowledge sources. Reject every option that would be
         # silently ignored rather than storing the file the wrong way. Only
