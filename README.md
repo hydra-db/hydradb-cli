@@ -58,7 +58,7 @@ This downloads the wheel for the latest [GitHub release](https://github.com/usec
 Install a specific version:
 
 ```bash
-HYDRADB_CLI_VERSION=0.2.0 curl -fsSL https://cli.hydradb.com/install | bash
+HYDRADB_CLI_VERSION=0.2.1 curl -fsSL https://cli.hydradb.com/install | bash
 ```
 
 Force reinstall:
@@ -70,7 +70,7 @@ HYDRADB_CLI_FORCE=1 curl -fsSL https://cli.hydradb.com/install | bash
 ### From a GitHub release
 
 ```bash
-pip install https://github.com/usecortex/hydradb-cli/releases/download/v0.2.0/hydradb_cli-0.2.0-py3-none-any.whl
+pip install https://github.com/usecortex/hydradb-cli/releases/download/v0.2.1/hydradb_cli-0.2.1-py3-none-any.whl
 ```
 
 > **Note:** PyPI releases are paused. `pip install hydradb-cli` still resolves the older `0.1.0`, so use
@@ -94,7 +94,7 @@ pip install -e ".[dev]"
 
 ```bash
 hydradb --version
-# hydradb-cli 0.2.0
+# hydradb-cli 0.2.1
 ```
 
 If `hydradb` is not found, make sure your virtual environment is activated or that your Python scripts directory is on your `PATH`.
@@ -225,13 +225,53 @@ Retrieve knowledge or memories — the single entry point for search.
 | `--recency-bias` | Preference for newer content (`0.0`–`1.0`) |
 | `--graph-context` / `--no-graph-context` | Include knowledge graph relations |
 | `--context` | Additional context to guide retrieval |
+| `--title` | Exact document title to search inside; repeat the flag for multiple titles |
 
 ```bash
 hydradb query "What did the team say about pricing?"
 hydradb query "contract terms" --kind knowledge --mode thinking --max-results 20
 hydradb query "What does the user prefer?" --kind memory
 hydradb query "pricing AND enterprise" --operator and
+hydradb query "Who owns the rollout?" --title "Q3 Roadmap.md" --title "Smith, John"
 ```
+
+Every query prints a `request_id`. That is the only key `feedback` correlates
+on, so keep it if you intend to rate the answer:
+
+```bash
+hydradb --output json query "contract terms" | jq -r .request_id
+```
+
+---
+
+### feedback
+
+Report whether a query's results were actually useful. It correlates on the
+`request_id` that query printed — nothing else about the original query is
+re-sent.
+
+| Flag | Meaning |
+|---|---|
+| `--feedback` / `-f` | What was right or wrong about the results |
+| `--rating` | Overall verdict: `positive`, `negative`, `neutral` |
+| `--ground-truth-answer` | The answer the query *should* have produced |
+| `--ground-truth-source-id` | A source id that should have been retrieved (repeatable) |
+| `--source` | Who is reporting: `user` (default), or `agent` for scripted runs |
+
+Ground truth is worth far more than prose: it is machine-checkable, so it can
+be scored automatically rather than read by a person.
+
+```bash
+hydradb feedback 8f1c0e8a-... --rating positive
+hydradb feedback 8f1c0e8a-... -f "returned the 2023 policy, not the current one" --rating negative
+hydradb feedback 8f1c0e8a-... \
+  --ground-truth-answer "Net 30, per the 2026 MSA" \
+  --ground-truth-source-id src_abc --ground-truth-source-id src_def
+```
+
+A submission needs at least one of `--feedback`, `--ground-truth-answer` or
+`--ground-truth-source-id`; an empty one is refused locally rather than after a
+round trip.
 
 ---
 
