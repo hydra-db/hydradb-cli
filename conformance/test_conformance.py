@@ -5,7 +5,8 @@ asserts, for every vector:
 
   (a) the wrapper emits the canonical operation (correct endpoint + HTTP method);
   (b) the SDK call carries the expected fields (``args_include`` / ``args_scope``)
-      and honours the content-type / forbidden-field guards;
+      and honours the content-type / forbidden-field guards (a unified-database
+      call is a raw v2 request rather than an SDK call, recorded the same way);
   (c) every deprecated **CLI** alias listed resolves to the same canonical
       operation (same endpoint + method).
 
@@ -49,6 +50,15 @@ def _dispatch(wrapper, op: str, args: dict):
     if op == "query":
         return ctx.query(query=args["query"], kind=args.get("kind"), operator=args.get("operator"))
     if op == "ingest":
+        if args.get("layout") == "unified":
+            # PRO-1618: the JSON body with the `context` list, in the contract's
+            # field names; `id` is the client-assigned context_id.
+            item = {
+                key: args[arg]
+                for arg, key in (("id", "context_id"), ("title", "title"), ("text", "text"))
+                if args.get(arg) is not None
+            }
+            return ctx.ingest_context([item])
         return ctx.ingest(kind=args["kind"], text=args.get("text"), title=args.get("title"))
     if op == "list":
         return ctx.list(kind=args.get("kind"))

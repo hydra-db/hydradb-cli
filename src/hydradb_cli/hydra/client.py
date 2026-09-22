@@ -111,6 +111,17 @@ def _bool_str(value: bool | None) -> str | None:
     return "true" if value else "false"
 
 
+#: Storage layouts (PRO-1618). ``split`` is every database that predates the
+#: change: a knowledge and a memory corpus, selected by ``type`` on every call.
+#: ``unified`` is one corpus; ``type`` is never sent to it.
+LAYOUT_SPLIT = "split"
+LAYOUT_UNIFIED = "unified"
+
+#: Item cap on a unified ``POST /context/ingest``, checked locally so an
+#: oversized batch is refused before it costs a round trip.
+UNIFIED_INGEST_MAX_ITEMS = 100
+
+
 class _Resource:
     """Base for the ``databases``/``context`` sub-resources."""
 
@@ -145,7 +156,27 @@ class _Databases(_Resource):
         embeddings_dimension: int | None = None,
         is_embeddings_tenant: bool | None = None,
         database_metadata_schema: Any | None = None,
+        layout: str | None = None,
     ) -> dict:
+        """Create a database.
+
+        ``layout`` is the storage layout (PRO-1618), sent as the wire field
+        ``type``: ``split`` (the default, and what every pre-existing database
+        is) or ``unified`` (one corpus; ``type`` is never sent on later calls).
+        A layout goes over the raw v2 path so the request does not depend on
+        which pinned SDK build knows the value; without one this is the
+        unchanged SDK call.
+        """
+        if layout is not None:
+            if layout not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
+                raise ValueError(f"layout must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}', got {layout!r}")
+            body: dict[str, Any] = {"database": database, "type": layout}
+            if embeddings_dimension is not None:
+                body["embeddings_dimension"] = embeddings_dimension
+            if database_metadata_schema is not None:
+                body["database_metadata_schema"] = database_metadata_schema
+            result = self._w._raw_post("/databases", json_body=body)
+            return result if isinstance(result, dict) else {}
         resp = self._invoke(
             self._w._sdk.databases.create,
             database=database,
@@ -162,6 +193,38 @@ class _Databases(_Resource):
     def list(self) -> dict:
         resp = self._invoke(self._w._sdk.databases.list)
         return _unwrap(resp)
+
+    def layouts(self) -> dict[str, str]:
+        """Every database this key can see, mapped to its storage layout.
+
+        Read from ``GET /databases`` ``details[].type`` (PRO-1618) and memoised
+        on the wrapper: a layout is fixed at creation, so it cannot go stale
+        within one process. A database missing from ``details[]`` (an older
+        server, or one that does not expose the field) is split, which is what
+        every pre-PRO-1618 database is.
+        """
+        if self._w._layouts is not None:
+            return self._w._layouts
+        listed = self.list()
+        layouts: dict[str, str] = {}
+        rows = listed.get("details") if isinstance(listed, dict) else None
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("database"):
+                layouts[str(row["database"])] = LAYOUT_UNIFIED if row.get("type") == LAYOUT_UNIFIED else LAYOUT_SPLIT
+        self._w._layouts = layouts
+        return layouts
+
+    def layout(self, database: str) -> str:
+        """The storage layout of one database: ``unified`` or ``split``.
+
+        A failed probe reads as split and is NOT memoised: split is the safe
+        answer for every database that predates PRO-1618, and once the probe
+        recovers the next call sees the real layout without a restart.
+        """
+        try:
+            return self.layouts().get(database, LAYOUT_SPLIT)
+        except Exception:  # noqa: BLE001 - the worst case is the old default
+            return LAYOUT_SPLIT
 
     def collections(self, *, database: str | None = None) -> dict:
         resp = self._invoke(self._w._sdk.databases.collections, database=self._w._require_database(database))
@@ -304,6 +367,60 @@ class _Context(_Resource):
             data["request_id"] = request_id
         return data
 
+    def query_unified(
+        self,
+        *,
+        query: str,
+        operator: str | None = None,
+        max_results: int | None = None,
+        mode: str | None = None,
+        alpha: float | None = None,
+        recency_bias: float | None = None,
+        graph_context: bool | None = None,
+        additional_context: str | None = None,
+        query_by: str | None = None,
+        titles: list[str] | None = None,
+        acl: list[str] | None = None,
+        follow_forceful_relations: bool | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> tuple[dict, str | None]:
+        """``POST /query`` against a UNIFIED database (PRO-1618).
+
+        Never sends ``type``: a unified database has one corpus, and the server
+        refuses ``knowledge``/``memory`` there. It goes over the raw v2 path
+        rather than the SDK because the pinned SDK spells the forceful-relations
+        switch by its deprecated alias and cannot be relied on to omit ``type``.
+
+        Returns ``(body, request_id)``. ``body`` is the four-key response
+        (``chunks``, ``graph``, ``relations``, ``llm_prompt``) exactly as the
+        server sent it, with nothing added, so ``--output json`` prints it
+        verbatim; ``request_id`` is lifted from the envelope's ``meta`` for
+        ``hydradb feedback``, which is the one thing the body cannot carry.
+        """
+        body = {
+            key: value
+            for key, value in {
+                "database": self._w._require_database(database),
+                "collection": self._w._resolve_collection(collection),
+                "query": query,
+                "operator": operator,
+                "max_results": max_results,
+                "mode": mode,
+                "alpha": alpha,
+                "recency_bias": recency_bias,
+                "graph_context": graph_context,
+                "additional_context": additional_context,
+                "query_by": query_by,
+                "titles": titles,
+                "acl": acl,
+                "follow_forceful_relations": follow_forceful_relations,
+            }.items()
+            if value is not None
+        }
+        data, meta = self._w._raw_post_with_meta("/query", json_body=body)
+        return (data if isinstance(data, dict) else {}), _request_id_of({"meta": meta})
+
     def ingest(
         self,
         *,
@@ -370,6 +487,48 @@ class _Context(_Resource):
             upsert=_bool_str(upsert),
         )
         return _unwrap(resp)
+
+    def ingest_context(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        enrich: bool | None = None,
+        upsert: bool | None = None,
+        instructions: str | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> dict:
+        """``POST /context/ingest`` on a UNIFIED database (PRO-1618).
+
+        A JSON body whose ``context`` list holds items of exactly one ``text``
+        or one ``conversation`` each, in the contract's field names. No
+        ``type``, no multipart, none of the split-era fields. Items are sent as
+        given; ``enrich``/``upsert``/``instructions`` are the request-level
+        defaults for them and travel only when set.
+
+        Returns the 202 payload: ``results[].source_id`` is the item's
+        ``context_id`` (server-minted when the item carried none).
+        """
+        if not items:
+            raise ValueError("ingest_context needs at least one item")
+        if len(items) > UNIFIED_INGEST_MAX_ITEMS:
+            raise ValueError(f"at most {UNIFIED_INGEST_MAX_ITEMS} items per request, got {len(items)}")
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or ("text" in item) == ("conversation" in item):
+                raise ValueError(f"context[{index}] must carry exactly one of 'text' or 'conversation'")
+        body: dict[str, Any] = {"database": self._w._require_database(database)}
+        coll = self._w._resolve_collection(collection)
+        if coll:
+            body["collection"] = coll
+        body["context"] = list(items)
+        if enrich is not None:
+            body["enrich"] = bool(enrich)
+        if upsert is not None:
+            body["upsert"] = bool(upsert)
+        if instructions is not None:
+            body["instructions"] = instructions
+        result = self._w._raw_post("/context/ingest", json_body=body)
+        return result if isinstance(result, dict) else {}
 
     def ingest_many(
         self,
@@ -980,6 +1139,9 @@ class HydraDB:
         self._token = token
         self._base_url = base_url or DEFAULT_BASE_URL
         self._timeout = timeout
+        # Storage layouts by database name, filled by the first
+        # ``databases.layouts()`` probe (PRO-1618). None until then.
+        self._layouts: dict[str, str] | None = None
         self.databases = _Databases(self)
         self.context = _Context(self)
         self.graph = _Graph(self)
@@ -1032,6 +1194,17 @@ class HydraDB:
         ``API-Version: 2`` headers, same shape-based unwrapping, same
         translated error type, so a caller cannot tell it from an SDK call.
         """
+        return self._raw_post_with_meta(path, json_body=json_body)[0]
+
+    def _raw_post_with_meta(self, path: str, *, json_body: Any) -> tuple[Any, dict]:
+        """:meth:`_raw_post`, also returning the envelope's ``meta``.
+
+        ``_unwrap_payload`` keeps ``data`` and drops ``meta``, which is where
+        ``request_id`` lives. A unified ``/query`` must hand back ``data``
+        untouched (the four-key body, printed verbatim) AND surface the request
+        id for ``hydradb feedback``, so this variant returns both. ``meta`` is
+        ``{}`` when the response was not an envelope.
+        """
         headers = {
             "Authorization": f"Bearer {self._token}",
             "API-Version": "2",
@@ -1054,7 +1227,8 @@ class HydraDB:
         if response.is_error:
             raise HydraDBClientError(response.status_code, _stringify_body(body))
 
-        return _unwrap_payload(body)
+        meta = body.get("meta") if isinstance(body, dict) else None
+        return _unwrap_payload(body), (meta if isinstance(meta, dict) else {})
 
     def _require_database(self, database: str | None) -> str:
         db = database or self.default_database

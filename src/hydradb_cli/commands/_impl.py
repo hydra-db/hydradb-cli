@@ -10,11 +10,15 @@ to the SDK directly.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import httpx
+import typer
 from rich.console import Group
 from rich.markup import escape
 from rich.panel import Panel
@@ -22,7 +26,18 @@ from rich.table import Table
 from rich.text import Text
 
 from hydradb_cli.hydra import HydraDBClientError
-from hydradb_cli.output import make_kv_table, make_table, print_error, print_result, spinner
+from hydradb_cli.hydra.client import LAYOUT_SPLIT, LAYOUT_UNIFIED
+from hydradb_cli.output import (
+    console,
+    err_console,
+    get_output_format,
+    make_kv_table,
+    make_table,
+    print_error,
+    print_json,
+    print_result,
+    spinner,
+)
 from hydradb_cli.utils.common import (
     get_wrapper,
     handle_api_error,
@@ -41,6 +56,12 @@ VALID_RATINGS = {"positive", "negative", "neutral"}
 # "agnet" is worth catching before it costs one.
 VALID_SOURCES = {"user", "agent"}
 VALID_FETCH_MODES = {"content", "url", "both"}
+# Unified ingest (PRO-1618): the context_category labels and conversation roles
+# the server accepts. Validated locally for the same reason --rating is.
+VALID_CATEGORIES = {"auto", "user_preference", "business_knowledge", "decision_trace"}
+VALID_ROLES = {"user", "assistant", "system"}
+# happened_at is a calendar date, YYYY-MM-DD only: no time, no zone.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _STATUS_LABELS = {
     "queued": "queued",
@@ -71,6 +92,53 @@ def _execute(spinner_msg: str, call: Callable[[], Any]) -> Any:
         handle_network_error(e)
 
 
+# ── storage layout (PRO-1618) ────────────────────────────────────────────────
+
+
+def _is_unified(wrapper: Any, database: str) -> bool:
+    """Whether ``database`` is a unified database.
+
+    One memoised ``GET /databases`` probe per wrapper; a failed probe reads as
+    split, which is what every pre-PRO-1618 database is. Compared by value so
+    a mocked wrapper (whose ``layout`` returns a MagicMock) reads as split too.
+    Every command branches on THIS, never on a request flag: a unified database
+    never receives ``type``, and a split one keeps every existing call as is.
+    """
+    return wrapper.databases.layout(database) == LAYOUT_UNIFIED
+
+
+def database_layout(tenant_id: str | None) -> tuple[str, str]:
+    """The database a command is about to touch and its layout, ``unified`` or ``split``."""
+    tid = require_tenant_id(tenant_id)
+    return tid, (LAYOUT_UNIFIED if _is_unified(get_wrapper(), tid) else LAYOUT_SPLIT)
+
+
+def _refuse_kind_on_unified(kind: str | None, database: str) -> None:
+    """A unified database has one corpus, so there is no kind to select.
+
+    The server refuses ``knowledge``/``memory`` there and the contract says
+    never to send ``type`` at all. Refused locally, naming the rule, rather
+    than silently swapped for something the user did not ask for.
+    """
+    if kind:
+        print_error(
+            f"Database '{database}' is unified: it has one corpus, so a kind ('{kind}') cannot be selected. "
+            "Re-run without --kind."
+        )
+
+
+def _refuse_split_write_on_unified(wrapper: Any, database: str, layout: str | None, what: str) -> None:
+    """The split ingest shapes (``memories``/``app_knowledge``/``documents``
+    with ``type``) are refused by a unified database. Probed here unless the
+    caller already resolved the layout, so the deprecated aliases are covered."""
+    unified = layout == LAYOUT_UNIFIED if layout is not None else _is_unified(wrapper, database)
+    if unified:
+        print_error(
+            f"Database '{database}' is unified: {what}. "
+            "Use 'hydradb ingest --text ...' or 'hydradb ingest --conversation-file ...' (no --kind)."
+        )
+
+
 # ── query ────────────────────────────────────────────────────────────────────
 
 
@@ -87,7 +155,138 @@ def _feedback_hint(r: dict) -> str:
     return f'\n[dim]request_id: {request_id}  ·  rate it: hydradb feedback {request_id} --feedback "..."[/dim]'
 
 
+def _is_unified_query_body(r: dict) -> bool:
+    """Shape detection (contract rule 4).
+
+    A unified body carries ``llm_prompt`` and a ``graph`` ARRAY; a split body
+    carries ``chunk_content``/``graph_context``. Stored logs and split databases
+    keep producing the old shape, so the layout probe alone cannot decide this.
+    """
+    return "llm_prompt" in r or isinstance(r.get("graph"), list)
+
+
+def _preview(text: str, limit: int) -> str:
+    return text[:limit] + "..." if len(text) > limit else text
+
+
+def _pct(score: Any) -> str:
+    return f"{score:.0%}" if isinstance(score, (int, float)) and not isinstance(score, bool) else ""
+
+
+def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
+    """One ``chunks[]``/``relations[].chunk`` item: context_id, score, content,
+    enrichment text and kind, temporal facts. Content is API data, so it is
+    rendered as plain Text and never parsed as markup."""
+    score = _pct(chunk.get("score"))
+    score_str = f" • {score}" if score else ""
+    context_id = chunk.get("context_id") or ""
+    id_str = f" • {escape(str(context_id))}" if context_id else ""
+    body: list[Any] = [Text(_preview(chunk.get("content") or "", 300))]
+    enrichment = chunk.get("enrichment")
+    if isinstance(enrichment, dict) and (enrichment.get("text") or enrichment.get("kind")):
+        kind = enrichment.get("kind")
+        head = f"enrichment ({kind}): " if kind else "enrichment: "
+        body.append(Text.assemble((head, "dim"), _preview(enrichment.get("text") or "", 300)))
+    for fact in chunk.get("temporal") or []:
+        if isinstance(fact, dict):
+            span = " to ".join(str(x) for x in (fact.get("start_date"), fact.get("end_date")) if x)
+            body.append(
+                Text.assemble(("temporal: ", "dim"), fact.get("content") or "", (f" [{span}]" if span else "", "dim"))
+            )
+    return Panel(
+        Group(*body),
+        title=f"[bold]{label}[/bold]{score_str}{id_str}",
+        title_align="left",
+        border_style="cyan",
+        padding=(0, 1),
+    )
+
+
+def _format_unified_query_result(r: dict, request_id: str | None = None):
+    """The four-key unified body (PRO-1618) for a person: ``chunks[]`` as
+    panels, ``graph[]`` as a path table (summary + triplets), ``relations[]``
+    as a table of what was pulled in by declared relations, and the feedback
+    hint. ``llm_prompt`` is not shown here: ``--llm`` prints it verbatim."""
+    chunks = r.get("chunks") or []
+    graph = r.get("graph") or []
+    relations = r.get("relations") or []
+    hint = _feedback_hint({"request_id": request_id}) if request_id else ""
+    if not chunks and not graph and not relations:
+        return "[dim]No relevant results found.[/dim]" + hint
+
+    parts: list[Any] = [Text(f"  Found {len(chunks)} result(s)", style="bold")]
+    for i, chunk in enumerate(chunks, 1):
+        parts.append(_unified_chunk_panel(chunk, str(i)))
+
+    if graph:
+        rows = []
+        for i, path in enumerate(graph, 1):
+            triplets = []
+            for triplet in path.get("triplets") or []:
+                src = (triplet.get("source") or {}).get("name") or "?"
+                predicate = (triplet.get("relation") or {}).get("predicate") or "related to"
+                tgt = (triplet.get("target") or {}).get("name") or "?"
+                triplets.append(f"{src} -> {predicate} -> {tgt}")
+            rows.append([f"P{i}", path.get("path_summary") or "", "\n".join(triplets)])
+        parts.append(
+            Panel(
+                make_table("#", "Path", "Triplets", rows=rows),
+                title=f"[bold cyan]/// Graph: {len(graph)} path(s)[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+
+    if relations:
+        rows = []
+        for rel in relations:
+            via = rel.get("via") or {}
+            chunk = rel.get("chunk") or {}
+            rows.append(
+                [
+                    via.get("from") or "",
+                    via.get("to") or chunk.get("context_id") or "",
+                    _pct(chunk.get("score")),
+                    _preview(chunk.get("content") or "", 120),
+                ]
+            )
+        parts.append(
+            Panel(
+                make_table("From", "To", "Score", "Content", rows=rows),
+                title=f"[bold cyan]/// Related: {len(relations)} chunk(s) via declared relations[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+
+    if hint:
+        parts.append(Text.from_markup(hint.lstrip("\n")))
+    return Group(*parts)
+
+
+def _print_unified_query(body: dict, request_id: str | None, *, llm: bool) -> None:
+    """Print a unified query result. ``--output json`` is the body verbatim, the
+    four keys and nothing added; ``--llm`` is the server-built prompt on plain
+    stdout (not Rich, which would re-wrap it at the terminal width and read
+    bracketed fragments as markup), with the feedback hint on stderr so the
+    prompt can be piped; otherwise the structured rendering."""
+    if get_output_format() == "json":
+        print_json(body)
+        return
+    if llm:
+        typer.echo(body.get("llm_prompt") or "")
+        if request_id:
+            err_console.print(_feedback_hint({"request_id": request_id}).lstrip("\n"))
+        return
+    console.print(_format_unified_query_result(body, request_id))
+
+
 def _format_query_result(r: dict):
+    if _is_unified_query_body(r):
+        # A unified body reached the split path (a failed layout probe sends a
+        # type-less SDK query, which a unified database answers in its own
+        # shape). Render it as what it is.
+        return _format_unified_query_result(r, r.get("request_id"))
     chunks = r.get("chunks") or []
     if not chunks:
         return "[dim]No relevant results found.[/dim]" + _feedback_hint(r)
@@ -138,6 +337,8 @@ def do_query(
     additional_context: str | None = None,
     titles: list[str] | None = None,
     acl: list[str] | None = None,
+    follow_forceful_relations: bool | None = None,
+    llm: bool = False,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     spinner_msg: str = "Searching...",
@@ -172,6 +373,39 @@ def do_query(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+
+    if _is_unified(wrapper, tid):
+        _refuse_kind_on_unified(kind, tid)
+        outcome = _execute(
+            spinner_msg,
+            lambda: wrapper.context.query_unified(
+                query=query,
+                operator=operator,
+                query_by="text" if operator else None,
+                max_results=max_results,
+                mode=mode,
+                alpha=alpha,
+                recency_bias=recency_bias,
+                graph_context=graph_context,
+                additional_context=additional_context,
+                titles=clean_titles,
+                acl=acl,
+                follow_forceful_relations=follow_forceful_relations,
+                database=tid,
+                collection=stid,
+            ),
+        )
+        body, request_id = outcome if isinstance(outcome, tuple) else (outcome, None)
+        _print_unified_query(body if isinstance(body, dict) else {}, request_id, llm=llm)
+        return
+
+    if follow_forceful_relations is not None:
+        print_error(
+            "--follow-forceful-relations/--no-follow-forceful-relations applies to unified databases only; "
+            f"'{tid}' is a split database."
+        )
+    if llm:
+        print_error(f"--llm applies to unified databases only; '{tid}' is a split database and has no llm_prompt.")
 
     result = _execute(
         spinner_msg,
@@ -302,10 +536,12 @@ def do_ingest_memory(
     upsert: bool = True,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    layout: str | None = None,
 ) -> None:
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    _refuse_split_write_on_unified(wrapper, tid, layout, "a memory (kind) cannot be written to it")
 
     result = _execute(
         "Adding memory...",
@@ -332,10 +568,12 @@ def do_ingest_knowledge_text(
     source_id: str | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    layout: str | None = None,
 ) -> None:
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    _refuse_split_write_on_unified(wrapper, tid, layout, "knowledge text (kind) cannot be written to it")
 
     result = _execute(
         "Uploading text...",
@@ -385,6 +623,7 @@ def do_ingest_knowledge_files(
     upsert: bool = False,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    layout: str | None = None,
 ) -> None:
     if not files:
         print_error("At least one file path is required.")
@@ -405,6 +644,9 @@ def do_ingest_knowledge_files(
         tid = require_tenant_id(tenant_id)
         stid = resolve_sub_tenant_id(sub_tenant_id)
         wrapper = get_wrapper()
+        _refuse_split_write_on_unified(
+            wrapper, tid, layout, "files are not accepted (text or a conversation only). Extract the text first"
+        )
 
         result = _execute(
             f"Uploading {len(files)} file(s)...",
@@ -444,6 +686,200 @@ def do_ingest_knowledge_files(
     print_result(result, fmt)
 
 
+# ── ingest (unified databases, PRO-1618) ─────────────────────────────────────
+
+
+def _load_conversation(path: str) -> list[dict[str, Any]]:
+    """Read ``--conversation-file``: a JSON list of ``{role, content, name?}``
+    turns. Every turn is checked here so a bad one is named by index locally
+    rather than as ``context[0]`` after a round trip."""
+    p = Path(path)
+    if not p.is_file():
+        print_error(f"Conversation file not found: {path}")
+    try:
+        turns = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print_error(f"--conversation-file must be a JSON list of {{role, content, name?}} turns: {exc}")
+    if not isinstance(turns, list) or not turns:
+        print_error("--conversation-file must be a non-empty JSON list of {role, content, name?} turns.")
+    clean: list[dict[str, Any]] = []
+    for i, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            print_error(f"conversation[{i}] must be an object with role and content.")
+        role = turn.get("role")
+        if role not in VALID_ROLES:
+            print_error(f"conversation[{i}].role must be one of: {', '.join(sorted(VALID_ROLES))}. Got {role!r}.")
+        content = turn.get("content")
+        if not isinstance(content, str) or not content.strip():
+            print_error(f"conversation[{i}].content must be a non-empty string.")
+        unknown = sorted(set(turn) - {"role", "content", "name"})
+        if unknown:
+            print_error(
+                f"conversation[{i}] has unknown field(s): {', '.join(unknown)}. Only role, content and name are accepted."
+            )
+        item: dict[str, Any] = {"role": role, "content": content}
+        name = turn.get("name")
+        if name is not None:
+            if not isinstance(name, str) or not name.strip():
+                print_error(f"conversation[{i}].name must be a non-empty string when present.")
+            item["name"] = name
+        clean.append(item)
+    return clean
+
+
+def _parse_json_object(raw: str | None, flag: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        print_error(f"{flag} must be a JSON object: {exc}")
+    if not isinstance(parsed, dict):
+        print_error(f'{flag} must be a JSON object, for example \'{{"team": "support"}}\'.')
+    return parsed
+
+
+def build_context_item(
+    *,
+    text: str | None = None,
+    conversation: list[dict[str, Any]] | None = None,
+    context_id: str | None = None,
+    title: str | None = None,
+    enrich: bool = True,
+    instructions: str | None = None,
+    happened_at: str | None = None,
+    attributes: dict[str, Any] | None = None,
+    custom_attributes: dict[str, Any] | None = None,
+    category: str | None = None,
+    forceful_relations: list[str] | None = None,
+    acl: list[str] | None = None,
+    upsert: bool = True,
+) -> dict[str, Any]:
+    """One ``context[]`` item in the contract's exact field names (PRO-1618).
+
+    Exactly one of ``text`` or ``conversation``. Optional fields are omitted
+    when unset, never sent as null; ``enrich`` and ``upsert`` are always sent
+    because the CLI always has a value for them.
+    """
+    if (text is None) == (conversation is None):
+        print_error("Pass exactly one of --text or --conversation-file.")
+    item: dict[str, Any] = {}
+    if context_id:
+        item["context_id"] = context_id
+    if title:
+        item["title"] = title
+    if text is not None:
+        item["text"] = text
+    else:
+        item["conversation"] = conversation
+    item["enrich"] = bool(enrich)
+    item["upsert"] = bool(upsert)
+    if instructions:
+        item["instructions"] = instructions
+    if happened_at:
+        try:
+            valid = bool(_DATE_RE.match(happened_at)) and date.fromisoformat(happened_at) is not None
+        except ValueError:
+            valid = False
+        if not valid:
+            print_error(f"--happened-at must be a calendar date in YYYY-MM-DD form, got '{happened_at}'.")
+        item["happened_at"] = happened_at
+    if attributes is not None:
+        item["attributes"] = attributes
+    if custom_attributes is not None:
+        item["custom_attributes"] = custom_attributes
+    if category:
+        if category not in VALID_CATEGORIES:
+            print_error(f"--category must be one of: {', '.join(sorted(VALID_CATEGORIES))}. Got '{category}'.")
+        item["context_category"] = category
+    if forceful_relations:
+        ids: list[str] = []
+        for value in forceful_relations:
+            candidate = (value or "").strip()
+            if not candidate:
+                print_error("--forceful-relation cannot be empty or whitespace-only.")
+            if candidate not in ids:
+                ids.append(candidate)
+        item["forceful_relations"] = {"ids": ids}
+    if acl is not None:
+        item["acl"] = list(acl)
+    return item
+
+
+def _format_ingest_unified(r: dict, item: dict[str, Any]):
+    success_count = r.get("success_count", 0)
+    failed_count = r.get("failed_count", 0)
+    ok = failed_count == 0
+    status = "green" if ok else "yellow"
+    mark = "✓" if ok else "!"
+    if "conversation" in item:
+        preview = f"conversation, {len(item['conversation'])} turn(s)"
+    else:
+        preview = f'"{_preview(item.get("text") or "", 80)}"'
+    lines = [
+        f"[{status}]{mark}[/{status}] Context queued ({success_count} success, {failed_count} failed)",
+        f"[dim]{escape(preview)}[/dim]",
+    ]
+    for res in r.get("results", []) or []:
+        # The 202 still spells the item's context_id `source_id`.
+        cid = res.get("source_id") or res.get("context_id") or res.get("id") or "unknown"
+        lines.append(f"[cyan]Context ID:[/cyan] {escape(str(cid))} [dim]({res.get('status', 'unknown')})[/dim]")
+        if res.get("error"):
+            code = f" ({res['error_code']})" if res.get("error_code") else ""
+            lines.append(f"[red]Error:[/red] {escape(str(res['error']))}{escape(code)}")
+    lines.append("[dim]Poll with 'hydradb verify <context id>'.[/dim]")
+    return Panel("\n".join(lines), border_style=status, padding=(0, 1))
+
+
+def do_ingest_unified(
+    *,
+    text: str | None = None,
+    conversation_file: str | None = None,
+    context_id: str | None = None,
+    title: str | None = None,
+    enrich: bool = True,
+    instructions: str | None = None,
+    happened_at: str | None = None,
+    attributes: str | None = None,
+    custom_attributes: str | None = None,
+    category: str | None = None,
+    forceful_relations: list[str] | None = None,
+    acl: list[str] | None = None,
+    upsert: bool = True,
+    tenant_id: str | None = None,
+    sub_tenant_id: str | None = None,
+) -> None:
+    """Ingest one context item into a UNIFIED database: a JSON ``POST
+    /context/ingest`` with the ``context`` list, no ``type``, no multipart."""
+    tid = require_tenant_id(tenant_id)
+    stid = resolve_sub_tenant_id(sub_tenant_id)
+    if conversation_file and text is not None:
+        print_error("Pass exactly one of --text or --conversation-file.")
+    conversation = _load_conversation(conversation_file) if conversation_file else None
+    item = build_context_item(
+        text=text,
+        conversation=conversation,
+        context_id=context_id,
+        title=title,
+        enrich=enrich,
+        instructions=instructions,
+        happened_at=happened_at,
+        attributes=_parse_json_object(attributes, "--attributes"),
+        custom_attributes=_parse_json_object(custom_attributes, "--custom-attributes"),
+        category=category,
+        forceful_relations=forceful_relations,
+        acl=acl,
+        upsert=upsert,
+    )
+    wrapper = get_wrapper()
+
+    result = _execute(
+        "Ingesting context...",
+        lambda: wrapper.context.ingest_context([item], database=tid, collection=stid),
+    )
+    print_result(result, lambda r: _format_ingest_unified(r, item))
+
+
 # ── list ─────────────────────────────────────────────────────────────────────
 
 
@@ -467,6 +903,9 @@ def do_list(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    if _is_unified(wrapper, tid):
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(kind, tid)
 
     result = _execute(
         spinner_msg,
@@ -577,26 +1016,33 @@ def do_inspect(
 def do_delete(
     ids: list[str],
     *,
-    kind: str,
+    kind: str | None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
 ) -> None:
     clean_ids = [i.strip() for i in ids if i.strip()]
     if not clean_ids:
         print_error("IDs cannot be empty.")
-    if kind not in VALID_KINDS:
+    if kind is not None and kind not in VALID_KINDS:
         print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
 
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    if _is_unified(wrapper, tid):
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(kind, tid)
+        noun = "item(s)"
+    else:
+        # The split default, unchanged: a delete without --kind is a knowledge delete.
+        kind = kind or "knowledge"
+        noun = "memory" if kind == "memory" else "knowledge source(s)"
 
     result = _execute(
         "Deleting...",
         lambda: wrapper.context.delete(ids=clean_ids, kind=kind, database=tid, collection=stid),
     )
 
-    noun = "memory" if kind == "memory" else "knowledge source(s)"
     # v2 returns HTTP 200 with {success:false, deleted_count:0} when nothing
     # matched — that is a no-op, not a success. Surface it as an error (non-zero
     # exit, and `{"success":false,"error":…}` in json mode) rather than claiming
@@ -631,6 +1077,9 @@ def do_relations(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    if _is_unified(wrapper, tid):
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(kind, tid)
 
     result = _execute(
         "Fetching graph relations...",
@@ -689,6 +1138,9 @@ def do_subgraph(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
+    if _is_unified(wrapper, tid):
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(kind, tid)
 
     result = _execute(
         "Traversing the connected subgraph...",
@@ -804,9 +1256,11 @@ def do_ingestion_status(
 # ── database group ───────────────────────────────────────────────────────────
 
 
-def do_database_create(database: str) -> None:
+def do_database_create(database: str, layout: str | None = None) -> None:
     if not database.strip():
         print_error("Database ID cannot be empty.")
+    if layout and layout not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
+        print_error(f"--type must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}'. Got '{layout}'.")
 
     # is_embeddings_tenant is deliberately not passed. The API treats it as an
     # internal flag: it provisions a raw-embeddings collection *instead of* the
@@ -815,9 +1269,10 @@ def do_database_create(database: str) -> None:
     wrapper = get_wrapper()
     result = _execute(
         "Creating database...",
-        lambda: wrapper.databases.create(database=database),
+        lambda: wrapper.databases.create(database=database, layout=layout),
     )
-    print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.")
+    suffix = " (unified: one corpus, no --kind on later commands)" if layout == LAYOUT_UNIFIED else ""
+    print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.{suffix}")
 
 
 def do_database_delete(database: str) -> None:
@@ -836,7 +1291,11 @@ def do_database_list() -> None:
         ids = r.get("databases") or r.get("tenant_ids") or []
         if not ids:
             return "[dim]No databases found.[/dim]"
-        return make_table("Database ID", rows=[[i] for i in ids], title=f"Found {len(ids)} database(s)")
+        # `details[]` (PRO-1618) carries each database's storage layout; a
+        # server that omits it has only split databases.
+        layouts = {row.get("database"): row.get("type") for row in (r.get("details") or []) if isinstance(row, dict)}
+        rows = [[i, LAYOUT_UNIFIED if layouts.get(i) == LAYOUT_UNIFIED else LAYOUT_SPLIT] for i in ids]
+        return make_table("Database ID", "Type", rows=rows, title=f"Found {len(ids)} database(s)")
 
     print_result(result, fmt)
 
