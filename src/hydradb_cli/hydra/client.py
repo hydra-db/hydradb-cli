@@ -217,14 +217,15 @@ class _Databases(_Resource):
     def layout(self, database: str) -> str:
         """The storage layout of one database: ``unified`` or ``split``.
 
-        A failed probe reads as split and is NOT memoised: split is the safe
-        answer for every database that predates PRO-1618, and once the probe
-        recovers the next call sees the real layout without a restart.
+        Split is what a SUCCESSFUL probe reports: a database missing from
+        ``details[]`` (an older server, or one that does not expose the
+        field) is what every pre-PRO-1618 database is. A failed probe
+        propagates instead — answering split on a network, auth or parse
+        failure would send the split request shape to a database that may
+        be unified. Failures are not memoised either: ``layouts()`` only
+        caches a response it actually got, so the next call asks again.
         """
-        try:
-            return self.layouts().get(database, LAYOUT_SPLIT)
-        except Exception:  # noqa: BLE001 - the worst case is the old default
-            return LAYOUT_SPLIT
+        return self.layouts().get(database, LAYOUT_SPLIT)
 
     def collections(self, *, database: str | None = None) -> dict:
         resp = self._invoke(self._w._sdk.databases.collections, database=self._w._require_database(database))

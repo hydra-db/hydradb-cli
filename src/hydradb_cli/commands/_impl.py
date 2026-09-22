@@ -98,13 +98,21 @@ def _execute(spinner_msg: str, call: Callable[[], Any]) -> Any:
 def _is_unified(wrapper: Any, database: str) -> bool:
     """Whether ``database`` is a unified database.
 
-    One memoised ``GET /databases`` probe per wrapper; a failed probe reads as
-    split, which is what every pre-PRO-1618 database is. Compared by value so
-    a mocked wrapper (whose ``layout`` returns a MagicMock) reads as split too.
+    One memoised ``GET /databases`` probe per wrapper. A successful probe that
+    does not list ``database`` reads as split, which is what every pre-PRO-1618
+    database is; a FAILED probe is the error it is, not a guess — guessing
+    split would send the split request shape to a database that may be
+    unified. Compared by value so a mocked wrapper (whose ``layout`` returns a
+    MagicMock) reads as split too.
     Every command branches on THIS, never on a request flag: a unified database
     never receives ``type``, and a split one keeps every existing call as is.
     """
-    return wrapper.databases.layout(database) == LAYOUT_UNIFIED
+    try:
+        return wrapper.databases.layout(database) == LAYOUT_UNIFIED
+    except HydraDBClientError as e:
+        handle_api_error(e)
+    except httpx.RequestError as e:
+        handle_network_error(e)
 
 
 def database_layout(tenant_id: str | None) -> tuple[str, str]:
@@ -878,6 +886,17 @@ def do_ingest_unified(
         lambda: wrapper.context.ingest_context([item], database=tid, collection=stid),
     )
     print_result(result, lambda r: _format_ingest_unified(r, item))
+    # A 202 only means accepted: the per-item verdicts are in the body, and a
+    # failure among them is a failed ingest. The panel above already printed
+    # the server's own error for the row; the exit code is what says the
+    # command did not succeed.
+    failed_rows = [
+        r
+        for r in (result.get("results") or [])
+        if isinstance(r, dict) and (r.get("error") or r.get("status") in ("failed", "errored"))
+    ]
+    if (result.get("failed_count") or 0) > 0 or failed_rows:
+        raise typer.Exit(code=1)
 
 
 # ── list ─────────────────────────────────────────────────────────────────────

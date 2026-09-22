@@ -194,7 +194,7 @@ class TestLayoutProbe:
         )
         assert w.databases.layout("a") == "split"
 
-    def test_a_failed_probe_reads_split_and_is_not_memoised(self):
+    def test_a_failed_probe_raises_and_is_not_memoised(self):
         failing = {"on": True}
 
         def handler(request):
@@ -203,9 +203,21 @@ class TestLayoutProbe:
             return httpx.Response(200, json=_databases_envelope([{"database": "a", "type": "unified"}]))
 
         w = _real_wrapper(handler)
-        assert w.databases.layout("a") == "split"
+        # A failed probe is an error, not a guess: answering split here would
+        # send the split request shape to a database that may be unified.
+        with pytest.raises(HydraDBClientError):
+            w.databases.layout("a")
         failing["on"] = False
         assert w.databases.layout("a") == "unified", "a failed probe must not be memoised"
+
+    def test_a_failed_probe_surfaces_as_a_cli_error(self):
+        _auth()
+        w = _mock("split")
+        w.databases.layout.side_effect = HydraDBClientError(401, "bad key")
+        with _patch(w):
+            result = runner.invoke(app, ["list"], env=_WIDE)
+        assert result.exit_code != 0
+        assert "Authentication failed" in result.output
 
     def test_a_mocked_wrapper_reads_as_split(self):
         # Compared by value: a MagicMock layout is not "unified", so every
@@ -662,11 +674,29 @@ class TestUnifiedIngestCommand:
         w = _mock("unified", **{"context.ingest_context": failed})
         with _patch(w):
             result = runner.invoke(app, ["ingest", "--text", "a note"], env=_WIDE)
-        assert result.exit_code == 0, result.output
+        # The server's own error text is still shown, and the exit code now
+        # says the ingest did not succeed.
+        assert result.exit_code != 0, result.output
         out = _plain(result.output)
         assert "0 success, 1 failed" in out
         assert "Context ID: big-1 (failed)" in out
         assert "Error: too large (TEXT_TOO_LARGE)" in out
+
+    def test_a_failed_row_under_a_zeroed_count_still_exits_nonzero(self):
+        _auth()
+        lying = {
+            **INGEST_202,
+            "results": [
+                {"source_id": "big-1", "status": "failed", "error": "too large", "error_code": "TEXT_TOO_LARGE"}
+            ],
+            "success_count": 1,
+            "failed_count": 0,
+        }
+        w = _mock("unified", **{"context.ingest_context": lying})
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note"], env=_WIDE)
+        assert result.exit_code != 0, result.output
+        assert "Error: too large" in _plain(result.output)
 
     def test_files_are_refused(self, tmp_path):
         _auth()
