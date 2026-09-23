@@ -16,7 +16,7 @@ jobs:
       # Job-level, because a step's own `env` block is out of scope for its `if`.
       HAS_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
