@@ -66,4 +66,4 @@ def delete(
         print_error("At least one source ID is required.")
     if not confirm:
         typer.confirm(f"Delete {len(clean_ids)} knowledge source(s)? This action is irreversible.", abort=True)
-    _impl.do_delete(clean_ids, kind="knowledge", tenant_id=tenant_id, sub_tenant_id=sub_tenant_id)
+    _impl.do_delete(clean_ids, kind="knowledge", tenant_id=tenant_id, sub_tenant_id=sub_tenant_id, kind_implied=True)

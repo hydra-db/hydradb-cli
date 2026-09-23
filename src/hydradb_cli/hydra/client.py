@@ -121,6 +121,11 @@ LAYOUT_UNIFIED = "unified"
 #: oversized batch is refused before it costs a round trip.
 UNIFIED_INGEST_MAX_ITEMS = 100
 
+#: The layout probe runs before every command, so it gets a short budget and
+#: no SDK retries: a slow or failing ``GET /databases`` must not hold up (or
+#: fail) a command that would otherwise succeed.
+LAYOUT_PROBE_TIMEOUT_S = 5
+
 
 class _Resource:
     """Base for the ``databases``/``context`` sub-resources."""
@@ -161,28 +166,19 @@ class _Databases(_Resource):
         """Create a database.
 
         ``layout`` is the storage layout (PRO-1618), sent as the wire field
-        ``type``: ``split`` (the default, and what every pre-existing database
-        is) or ``unified`` (one corpus; ``type`` is never sent on later calls).
-        A layout goes over the raw v2 path so the request does not depend on
-        which pinned SDK build knows the value; without one this is the
-        unchanged SDK call.
+        ``type``: ``split`` or ``unified`` (one corpus; ``type`` is never sent
+        on later calls). Without one the server picks, and current servers
+        pick unified.
         """
-        if layout is not None:
-            if layout not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
-                raise ValueError(f"layout must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}', got {layout!r}")
-            body: dict[str, Any] = {"database": database, "type": layout}
-            if embeddings_dimension is not None:
-                body["embeddings_dimension"] = embeddings_dimension
-            if database_metadata_schema is not None:
-                body["database_metadata_schema"] = database_metadata_schema
-            result = self._w._raw_post("/databases", json_body=body)
-            return result if isinstance(result, dict) else {}
+        if layout is not None and layout not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
+            raise ValueError(f"layout must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}', got {layout!r}")
         resp = self._invoke(
             self._w._sdk.databases.create,
             database=database,
             embeddings_dimension=embeddings_dimension,
             is_embeddings_tenant=is_embeddings_tenant,
             database_metadata_schema=database_metadata_schema,
+            type=layout,
         )
         return _unwrap(resp)
 
@@ -205,7 +201,12 @@ class _Databases(_Resource):
         """
         if self._w._layouts is not None:
             return self._w._layouts
-        listed = self.list()
+        listed = _unwrap(
+            self._invoke(
+                self._w._sdk.databases.list,
+                request_options={"timeout_in_seconds": LAYOUT_PROBE_TIMEOUT_S, "max_retries": 0},
+            )
+        )
         layouts: dict[str, str] = {}
         rows = listed.get("details") if isinstance(listed, dict) else None
         for row in rows or []:
@@ -389,41 +390,49 @@ class _Context(_Resource):
         """``POST /query`` against a UNIFIED database (PRO-1618).
 
         Never sends ``type``: a unified database has one corpus, and the server
-        refuses ``knowledge``/``memory`` there. It goes over the raw v2 path
-        rather than the SDK because the pinned SDK spells the forceful-relations
-        switch by its deprecated alias and cannot be relied on to omit ``type``.
+        refuses ``knowledge``/``memory`` there. The SDK (2.1.6+) reads the
+        answer as its four-key ``SearchQueryResult``.
 
         Returns ``(body, request_id)``. ``body`` is the four-key response
-        (``chunks``, ``graph``, ``forceful_relations``, ``llm_prompt``) exactly
-        as the server sent it, with nothing added, so ``--output json`` prints
-        it verbatim; ``request_id`` is lifted from the envelope's ``meta`` for
-        ``hydradb feedback``, which is the one thing the body cannot carry.
-        ``request_id`` is the ONLY key read from that ``meta``: a unified
-        response's meta has no ``tenant_id``, ``sub_tenant_id`` or
-        ``source_type``.
+        (``chunks``, ``graph``, ``forceful_relations``, ``llm_prompt``) as the
+        server sent it: dumped with ``exclude_unset`` so no key the server did
+        not send is added, and ``--output json`` prints it verbatim.
+        ``request_id`` is lifted from the envelope's ``meta`` for ``hydradb
+        feedback``, the one thing the body cannot carry.
         """
-        body = {
-            key: value
-            for key, value in {
-                "database": self._w._require_database(database),
-                "collection": self._w._resolve_collection(collection),
-                "query": query,
-                "operator": operator,
-                "max_results": max_results,
-                "mode": mode,
-                "alpha": alpha,
-                "recency_bias": recency_bias,
-                "graph_context": graph_context,
-                "additional_context": additional_context,
-                "query_by": query_by,
-                "titles": titles,
-                "acl": acl,
-                "follow_forceful_relations": follow_forceful_relations,
-            }.items()
-            if value is not None
+        kwargs = {
+            "database": self._w._require_database(database),
+            "collection": self._w._resolve_collection(collection),
+            "query": query,
+            "operator": operator,
+            "max_results": max_results,
+            "mode": mode,
+            "alpha": alpha,
+            "recency_bias": recency_bias,
+            "graph_context": graph_context,
+            "additional_context": additional_context,
+            "query_by": query_by,
+            "titles": titles,
+            "acl": acl,
+            "follow_forceful_relations": follow_forceful_relations,
         }
-        data, meta = self._w._raw_post_with_meta("/query", json_body=body)
-        return (data if isinstance(data, dict) else {}), _request_id_of({"meta": meta})
+        try:
+            resp = self._w._sdk.query(**{k: v for k, v in kwargs.items() if v is not None})
+        except ParsingError as exc:
+            # A successful answer the SDK's model rejects (it requires every
+            # list key, and the contract lets `forceful_relations` be absent)
+            # is still the server's answer: use it as sent, no second request.
+            envelope = exc.body if isinstance(exc.body, dict) else None
+            body = envelope.get("data") if envelope else None
+            if exc.status_code and 200 <= exc.status_code < 300 and isinstance(body, dict):
+                return body, _request_id_of(envelope)
+            raise translate_sdk_error(exc) from exc
+        except (ApiError, httpx.HTTPError) as exc:
+            raise translate_sdk_error(exc) from exc
+        data = getattr(resp, "data", None)
+        dump = getattr(data, "model_dump", None)
+        body = dump(mode="json", by_alias=True, exclude_unset=True) if callable(dump) else _unwrap(resp)
+        return (body if isinstance(body, dict) else {}), _request_id_of(resp)
 
     def ingest(
         self,
@@ -510,7 +519,7 @@ class _Context(_Resource):
         given; ``enrich``/``upsert``/``instructions`` are the request-level
         defaults for them and travel only when set.
 
-        Returns the 202 payload: ``results[].source_id`` is the item's
+        Returns the 202 payload: ``results[].id`` is the item's
         ``context_id`` (server-minted when the item carried none).
         """
         if not items:
@@ -520,6 +529,9 @@ class _Context(_Resource):
         for index, item in enumerate(items):
             if not isinstance(item, dict) or ("text" in item) == ("conversation" in item):
                 raise ValueError(f"context[{index}] must carry exactly one of 'text' or 'conversation'")
+        # A JSON body, as the shared conformance vector `ingest-unified-json`
+        # requires. The SDK (2.1.6) can only send `context` as a multipart form
+        # field, so this one call stays on the raw path.
         body: dict[str, Any] = {"database": self._w._require_database(database)}
         coll = self._w._resolve_collection(collection)
         if coll:
@@ -1198,17 +1210,6 @@ class HydraDB:
         ``API-Version: 2`` headers, same shape-based unwrapping, same
         translated error type, so a caller cannot tell it from an SDK call.
         """
-        return self._raw_post_with_meta(path, json_body=json_body)[0]
-
-    def _raw_post_with_meta(self, path: str, *, json_body: Any) -> tuple[Any, dict]:
-        """:meth:`_raw_post`, also returning the envelope's ``meta``.
-
-        ``_unwrap_payload`` keeps ``data`` and drops ``meta``, which is where
-        ``request_id`` lives. A unified ``/query`` must hand back ``data``
-        untouched (the four-key body, printed verbatim) AND surface the request
-        id for ``hydradb feedback``, so this variant returns both. ``meta`` is
-        ``{}`` when the response was not an envelope.
-        """
         headers = {
             "Authorization": f"Bearer {self._token}",
             "API-Version": "2",
@@ -1231,8 +1232,7 @@ class HydraDB:
         if response.is_error:
             raise HydraDBClientError(response.status_code, _stringify_body(body))
 
-        meta = body.get("meta") if isinstance(body, dict) else None
-        return _unwrap_payload(body), (meta if isinstance(meta, dict) else {})
+        return _unwrap_payload(body)
 
     def _require_database(self, database: str | None) -> str:
         db = database or self.default_database

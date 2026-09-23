@@ -308,7 +308,7 @@ defaults to `--kind memory`, and file arguments are always knowledge sources.
 | `--text` / `-t` | Text to ingest. Use `-` to read from stdin |
 | `--title` | Optional title |
 | `--source-id` | Client-assigned source identifier (the `--context-id` on a unified database) |
-| `--user-name` | User name (split memory only) |
+| `--user-name` | Who is speaking (split: memory only; unified: any item, sent as `user_name`) |
 | `--infer` / `--no-infer` | Extract insights and build the knowledge graph (default on) |
 | `--markdown` | Treat text as markdown (split memory only) |
 | `--upsert` / `--no-upsert` | Update existing items with the same id (default on) |
@@ -325,13 +325,13 @@ echo "piped note" | hydradb ingest
 apply to file ingest and are rejected rather than silently ignored.
 
 On a **unified database** `ingest` sends one JSON context item (exactly one of
-`--text` or `--conversation-file`) and never a `type`. Files, `--kind`,
-`--user-name` and `--markdown` are refused there with a message; these options
-apply there and are refused on a split database:
+`--text` or `--conversation-file`) and never a `type`. Files, `--kind` and
+`--markdown` are refused there with a message; `--user-name` names the speaker.
+These options apply there and are refused on a split database:
 
 | Option | Description |
 |--------|-------------|
-| `--conversation-file` | Path to a JSON list of `{role, content, name?}` turns (roles `user`, `assistant`, `system`) |
+| `--conversation-file` | Path to a JSON list of `{role, content}` turns (roles `user`, `assistant`, `system`); name the user with `--user-name` |
 | `--context-id` | Caller-assigned id for the item (server-generated when omitted) |
 | `--enrich` / `--no-enrich` | Extract facts and graph relations for the item (default on; `--no-infer` means the same) |
 | `--instructions` | Steer enrichment for this item |
@@ -401,7 +401,7 @@ Create and manage databases.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `database create <database>` | Provisions a new database; `--type unified` gives it one corpus (no `--kind` on later commands) instead of the default `split` layout | `--type` |
+| `database create <database>` | Provisions a new database; `--type split` or `--type unified` picks the layout. Without `--type` the server picks, and current servers pick `unified` | `--type` |
 | `database list` | Lists all databases for the authenticated user, with each one's type (`split` or `unified`) | - |
 | `database collections [database]` | Lists collections within a database | — |
 | `database stats [database]` | Row-count statistics | — |
