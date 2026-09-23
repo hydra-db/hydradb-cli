@@ -649,6 +649,24 @@ class TestQueryRenderer:
         assert "Pricing is $29/mo" in out
         assert "/// Forceful relations" not in out and "/// Graph" not in out
 
+    def test_unified_content_enrichment_and_forceful_rows_are_never_trimmed(self):
+        # The unified answer is not compacted anywhere: long content,
+        # enrichment and a forceful chunk's content all reach the screen whole.
+        long = " ".join(["word"] * 150)
+        chunk = {"chunk_id": "c1", "context_id": "doc-1", "score": 0.5}
+        body = {
+            "chunks": [{**chunk, "content": long + " CONTENTTAIL", "enrichment": long + " ENRICHTAIL"}],
+            "graph": [],
+            "forceful_relations": [
+                {"via": {"from": "doc-1", "to": "doc-2"}, "chunk": {**chunk, "content": long + " FORCEFULTAIL"}}
+            ],
+            "llm_prompt": "",
+        }
+        out = self._render(_impl._format_query_result(body))
+        for tail in ("CONTENTTAIL", "ENRICHTAIL", "FORCEFULTAIL"):
+            assert tail in out, tail
+        assert "..." not in out
+
     def test_the_split_golden_renders_through_the_split_renderer_unchanged(self):
         out = self._render(_impl._format_query_result(SPLIT_BODY))
         assert "Found 1 result(s)" in out

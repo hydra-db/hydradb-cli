@@ -189,20 +189,22 @@ def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
     """One ``chunks[]`` item: context_id, score, content, enrichment and
     enrichment_kind, temporal facts. ``enrichment`` is a plain string and
     ``enrichment_kind`` its sibling (the declared context_category); either
-    can be absent, and a kind with no enrichment is still shown. Content is
-    API data, so it is rendered as plain Text and never parsed as markup."""
+    can be absent, and a kind with no enrichment is still shown. Content and
+    enrichment are shown whole, never trimmed (the unified answer is not
+    compacted anywhere). Content is API data, so it is rendered as plain Text
+    and never parsed as markup."""
     score = _pct(chunk.get("score"))
     score_str = f" • {score}" if score else ""
     context_id = chunk.get("context_id") or ""
     id_str = f" • {escape(str(context_id))}" if context_id else ""
-    body: list[Any] = [Text(_preview(chunk.get("content") or "", 300))]
+    body: list[Any] = [Text(chunk.get("content") or "")]
     enrichment = chunk.get("enrichment")
     enrichment = enrichment if isinstance(enrichment, str) else ""
     kind = chunk.get("enrichment_kind")
     kind = kind if isinstance(kind, str) else ""
     if enrichment or kind:
         head = f"enrichment ({kind})" if kind else "enrichment"
-        body.append(Text.assemble((f"{head}: " if enrichment else head, "dim"), _preview(enrichment, 300)))
+        body.append(Text.assemble((f"{head}: " if enrichment else head, "dim"), enrichment))
     for fact in chunk.get("temporal") or []:
         if isinstance(fact, dict):
             span = " to ".join(str(x) for x in (fact.get("start_date"), fact.get("end_date")) if x)
@@ -327,7 +329,7 @@ def _forceful_relations_panel(forceful: list) -> Panel:
                 via.get("from") or "",
                 via.get("to") or chunk.get("context_id") or "",
                 _pct(chunk.get("score")),
-                _preview(chunk.get("content") or "", 120),
+                chunk.get("content") or "",
             ]
         )
     return Panel(
