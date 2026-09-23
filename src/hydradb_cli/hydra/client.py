@@ -400,23 +400,35 @@ class _Context(_Resource):
         ``request_id`` is lifted from the envelope's ``meta`` for ``hydradb
         feedback``, the one thing the body cannot carry.
         """
-        resp = self._invoke(
-            self._w._sdk.query,
-            database=self._w._require_database(database),
-            collection=self._w._resolve_collection(collection),
-            query=query,
-            operator=operator,
-            max_results=max_results,
-            mode=mode,
-            alpha=alpha,
-            recency_bias=recency_bias,
-            graph_context=graph_context,
-            additional_context=additional_context,
-            query_by=query_by,
-            titles=titles,
-            acl=acl,
-            follow_forceful_relations=follow_forceful_relations,
-        )
+        kwargs = {
+            "database": self._w._require_database(database),
+            "collection": self._w._resolve_collection(collection),
+            "query": query,
+            "operator": operator,
+            "max_results": max_results,
+            "mode": mode,
+            "alpha": alpha,
+            "recency_bias": recency_bias,
+            "graph_context": graph_context,
+            "additional_context": additional_context,
+            "query_by": query_by,
+            "titles": titles,
+            "acl": acl,
+            "follow_forceful_relations": follow_forceful_relations,
+        }
+        try:
+            resp = self._w._sdk.query(**{k: v for k, v in kwargs.items() if v is not None})
+        except ParsingError as exc:
+            # A successful answer the SDK's model rejects (it requires every
+            # list key, and the contract lets `forceful_relations` be absent)
+            # is still the server's answer: use it as sent, no second request.
+            envelope = exc.body if isinstance(exc.body, dict) else None
+            body = envelope.get("data") if envelope else None
+            if exc.status_code and 200 <= exc.status_code < 300 and isinstance(body, dict):
+                return body, _request_id_of(envelope)
+            raise translate_sdk_error(exc) from exc
+        except (ApiError, httpx.HTTPError) as exc:
+            raise translate_sdk_error(exc) from exc
         data = getattr(resp, "data", None)
         dump = getattr(data, "model_dump", None)
         body = dump(mode="json", by_alias=True, exclude_unset=True) if callable(dump) else _unwrap(resp)

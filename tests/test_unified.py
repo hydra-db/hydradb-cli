@@ -316,6 +316,25 @@ class TestUnifiedQueryWrapper:
         assert body == EMPTY_BODY
         assert request_id is None
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {k: v for k, v in UNIFIED_BODY.items() if k != "forceful_relations"},
+            {**UNIFIED_BODY, "graph": None, "forceful_relations": None},
+        ],
+        ids=["forceful_relations absent", "lists null"],
+    )
+    def test_an_answer_the_sdk_model_rejects_is_used_as_sent(self, body):
+        # The SDK's four-key model requires every list; the contract lets
+        # forceful_relations be absent. One request, the server's body as sent.
+        seen = []
+        envelope = {"success": True, "data": body, "meta": {"request_id": "req-3"}}
+        w = _real_wrapper(_sdk_server({"/query": (200, envelope)}, seen))
+        out, request_id = w.context.query_unified(query="q")
+        assert out == body
+        assert request_id == "req-3"
+        assert len(seen) == 1
+
     def test_a_refusal_is_a_client_error(self):
         refusal = {"success": False, "error": {"message": "knowledge is not valid"}}
         w = _real_wrapper(_sdk_server({"/query": (400, refusal)}, []))
