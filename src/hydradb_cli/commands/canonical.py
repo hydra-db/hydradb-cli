@@ -47,7 +47,9 @@ def _resolve_text_input(text: str | None) -> str:
 
 def query(
     query_text: str = typer.Argument(metavar="QUERY", help="Search query."),
-    kind: str | None = typer.Option(None, "--kind", help="Corpus to query: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None, "--kind", help="Corpus to query on a split database: 'memory' or 'knowledge'. Not used on a unified one."
+    ),
     operator: str | None = typer.Option(None, "--operator", help="Keyword operator: 'or', 'and', or 'phrase'."),
     max_results: int = typer.Option(10, "--max-results", "-n", help="Maximum number of results (1-50)."),
     mode: str | None = typer.Option(None, "--mode", "-m", help="Retrieval mode: 'fast' or 'thinking'."),
@@ -66,6 +68,16 @@ def query(
         None,
         "--acl",
         help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+    ),
+    follow_forceful_relations: bool | None = typer.Option(
+        None,
+        "--follow-forceful-relations/--no-follow-forceful-relations",
+        help="Unified databases only: also return chunks pulled in by relations declared at ingest (server default on).",
+    ),
+    llm: bool = typer.Option(
+        False,
+        "--llm",
+        help="Unified databases only: print the server-built llm_prompt verbatim, ready to inject into a model call.",
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -86,6 +98,8 @@ def query(
         additional_context=additional_context,
         titles=list(titles) if titles else None,
         acl=list(acl) if acl else None,
+        follow_forceful_relations=follow_forceful_relations,
+        llm=llm,
         tenant_id=tid,
         sub_tenant_id=stid,
     )
@@ -128,22 +142,126 @@ def feedback(
 
 
 def ingest(
-    files: list[str] | None = typer.Argument(None, help="Knowledge file path(s) to ingest."),
-    kind: str | None = typer.Option(None, "--kind", help="Kind to ingest: 'memory' (default) or 'knowledge'."),
+    files: list[str] | None = typer.Argument(None, help="Knowledge file path(s) to ingest (split databases only)."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Kind to ingest on a split database: 'memory' (default) or 'knowledge'. Not used on a unified one.",
+    ),
     text: str | None = typer.Option(None, "--text", "-t", help="Text to ingest. Use '-' to read from stdin."),
     title: str | None = typer.Option(None, "--title", help="Optional title."),
-    source_id: str | None = typer.Option(None, "--source-id", help="Source identifier."),
-    user_name: str | None = typer.Option(None, "--user-name", help="User name (memory only)."),
+    source_id: str | None = typer.Option(
+        None, "--source-id", help="Source identifier (--context-id on a unified database)."
+    ),
+    user_name: str | None = typer.Option(None, "--user-name", help="User name (split memory only)."),
     infer: bool = typer.Option(True, "--infer/--no-infer", help="Extract insights and build knowledge graph."),
-    markdown: bool = typer.Option(False, "--markdown", help="Treat text as markdown (memory only)."),
-    upsert: bool = typer.Option(True, "--upsert/--no-upsert", help="Update existing items with the same source_id."),
+    markdown: bool = typer.Option(False, "--markdown", help="Treat text as markdown (split memory only)."),
+    upsert: bool = typer.Option(True, "--upsert/--no-upsert", help="Update existing items with the same id."),
+    conversation_file: str | None = typer.Option(
+        None,
+        "--conversation-file",
+        help="Unified databases: path to a JSON list of {role, content, name?} turns to ingest as one conversation (roles: user, assistant, system).",
+    ),
+    context_id: str | None = typer.Option(
+        None,
+        "--context-id",
+        help="Unified databases: caller-assigned id for the item (server-generated when omitted). --source-id means the same there.",
+    ),
+    enrich: bool = typer.Option(
+        True,
+        "--enrich/--no-enrich",
+        help="Unified databases: extract facts and graph relations for the item. --no-infer means the same there.",
+    ),
+    instructions: str | None = typer.Option(
+        None, "--instructions", help="Unified databases: steer enrichment for this item."
+    ),
+    happened_at: str | None = typer.Option(
+        None, "--happened-at", help="Unified databases: the event date the item is about, YYYY-MM-DD."
+    ),
+    attributes: str | None = typer.Option(
+        None, "--attributes", help="Unified databases: declared, filterable attributes as a JSON object."
+    ),
+    custom_attributes: str | None = typer.Option(
+        None, "--custom-attributes", help="Unified databases: free-form attributes as a JSON object."
+    ),
+    category: str | None = typer.Option(
+        None,
+        "--category",
+        help="Unified databases: context_category label: 'auto', 'user_preference', 'business_knowledge' or 'decision_trace'.",
+    ),
+    forceful_relation: list[str] | None = typer.Option(
+        None,
+        "--forceful-relation",
+        help="Unified databases: a context id this item is declared related to; repeatable.",
+    ),
+    acl: list[str] | None = typer.Option(
+        None,
+        "--acl",
+        help="Unified databases: a principal allowed to retrieve the item, repeatable (user_email:a@x.com, domain:acme.com).",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
-    """Ingest a memory, knowledge text, or knowledge file(s)."""
+    """Ingest a memory, knowledge text, or knowledge file(s); on a unified database, one context item."""
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
+    # The layout decides the request shape (PRO-1618), never a flag: a unified
+    # database gets one JSON context item and never a kind; a split one keeps
+    # every existing call exactly as it was.
+    db, layout = _impl.database_layout(tid)
+    if layout == "unified":
+        if files:
+            print_error(
+                f"Database '{db}' is unified: files are not accepted (text or a conversation only). "
+                "Extract the text and pass it with --text."
+            )
+        if kind:
+            print_error(f"Database '{db}' is unified: it has one corpus, so --kind does not apply. Omit it.")
+        if user_name:
+            print_error(
+                "--user-name does not apply on a unified database; name speakers per turn in --conversation-file."
+            )
+        if markdown:
+            print_error("--markdown does not apply on a unified database.")
+        if conversation_file and text:
+            print_error("Pass exactly one of --text or --conversation-file.")
+        if context_id and source_id and context_id != source_id:
+            print_error("--context-id and --source-id name the same thing on a unified database; pass one of them.")
+        _impl.do_ingest_unified(
+            text=None if conversation_file else _resolve_text_input(text),
+            conversation_file=conversation_file,
+            context_id=context_id or source_id,
+            title=title,
+            enrich=enrich and infer,
+            instructions=instructions,
+            happened_at=happened_at,
+            attributes=attributes,
+            custom_attributes=custom_attributes,
+            category=category,
+            forceful_relations=list(forceful_relation) if forceful_relation else None,
+            acl=list(acl) if acl else None,
+            upsert=upsert,
+            tenant_id=tid,
+            sub_tenant_id=stid,
+        )
+        return
+
+    unified_only = {
+        "--conversation-file": conversation_file,
+        "--context-id": context_id,
+        "--no-enrich": not enrich,
+        "--instructions": instructions,
+        "--happened-at": happened_at,
+        "--attributes": attributes,
+        "--custom-attributes": custom_attributes,
+        "--category": category,
+        "--forceful-relation": forceful_relation,
+        "--acl": acl,
+    }
+    used = [flag for flag, value in unified_only.items() if value]
+    if used:
+        print_error(f"{', '.join(used)} appl{'ies' if len(used) == 1 else 'y'} to unified databases only.")
     if files:
         # Files are always knowledge sources. Reject every option that would be
         # silently ignored rather than storing the file the wrong way. Only
@@ -156,7 +274,7 @@ def ingest(
             print_error("--markdown does not apply to file ingest; pass files only.")
         if not infer:
             print_error("--infer/--no-infer does not apply to file ingest; pass files only.")
-        _impl.do_ingest_knowledge_files(files, upsert=upsert, tenant_id=tid, sub_tenant_id=stid)
+        _impl.do_ingest_knowledge_files(files, upsert=upsert, tenant_id=tid, sub_tenant_id=stid, layout=layout)
         return
     if kind == "knowledge":
         _impl.do_ingest_knowledge_text(
@@ -165,6 +283,7 @@ def ingest(
             source_id=source_id,
             tenant_id=tid,
             sub_tenant_id=stid,
+            layout=layout,
         )
         return
     _impl.do_ingest_memory(
@@ -177,11 +296,14 @@ def ingest(
         upsert=upsert,
         tenant_id=tid,
         sub_tenant_id=stid,
+        layout=layout,
     )
 
 
 def list_items(
-    kind: str | None = typer.Option(None, "--kind", help="Filter by kind: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None, "--kind", help="Filter by kind on a split database: 'memory' or 'knowledge'. Not used on a unified one."
+    ),
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
     acl: list[str] | None = typer.Option(
@@ -221,7 +343,11 @@ def inspect(
 
 def delete(
     ids: list[str] = typer.Argument(help="One or more IDs to delete."),
-    kind: str = typer.Option("knowledge", "--kind", help="Kind to delete: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Kind to delete on a split database: 'knowledge' (default) or 'memory'. Not used on a unified one.",
+    ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", hidden=True),
@@ -240,7 +366,9 @@ def delete(
 
 def relations(
     source_id: str = typer.Argument(help="Source ID to fetch graph relations for."),
-    kind: str | None = typer.Option(None, "--kind", help="Corpus: 'memory' or 'knowledge'."),
+    kind: str | None = typer.Option(
+        None, "--kind", help="Corpus on a split database: 'memory' or 'knowledge'. Not used on a unified one."
+    ),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
     acl: list[str] | None = typer.Option(
         None,
@@ -261,7 +389,9 @@ def relations(
 
 def subgraph(
     source_id: str = typer.Argument(help="Item ID to start from (from 'hydradb query' or 'hydradb list')."),
-    kind: str | None = typer.Option(None, "--kind", help="Corpus: 'knowledge' (default) or 'memory'."),
+    kind: str | None = typer.Option(
+        None, "--kind", help="Corpus on a split database: 'knowledge' (default) or 'memory'. Not used on a unified one."
+    ),
     depth: int | None = typer.Option(None, "--depth", help="Hops to traverse (1–10; server default 5)."),
     max_sources: int | None = typer.Option(None, "--max-sources", help="Cap on members returned (server default 200)."),
     acl: list[str] | None = typer.Option(
@@ -354,9 +484,14 @@ def doctor() -> None:
 @database_app.command("create")
 def database_create(
     database: str = typer.Argument(help="Unique database identifier."),
+    layout: str | None = typer.Option(
+        None,
+        "--type",
+        help="Storage layout: 'split' (default; separate knowledge and memory corpora selected by --kind) or 'unified' (one corpus; no --kind on later commands).",
+    ),
 ) -> None:
     """Create a new database."""
-    _impl.do_database_create(database)
+    _impl.do_database_create(database, layout)
 
 
 @database_app.command("delete")

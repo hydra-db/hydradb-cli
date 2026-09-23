@@ -217,7 +217,7 @@ Retrieve knowledge or memories — the single entry point for search.
 
 | Option | Description |
 |--------|-------------|
-| `--kind` | Corpus to search: `memory` or `knowledge`. Omit to search both |
+| `--kind` | Split databases: corpus to search, `memory` or `knowledge`. Omit to search both. Not used on a unified database |
 | `--operator` | Keyword operator: `or`, `and`, `phrase` |
 | `--max-results` / `-n` | Maximum results, 1–50 (default `10`) |
 | `--mode` / `-m` | Retrieval mode: `fast` or `thinking` |
@@ -226,6 +226,8 @@ Retrieve knowledge or memories — the single entry point for search.
 | `--graph-context` / `--no-graph-context` | Include knowledge graph relations |
 | `--context` | Additional context to guide retrieval |
 | `--title` | Exact document title to search inside; repeat the flag for multiple titles |
+| `--follow-forceful-relations` / `--no-follow-forceful-relations` | Unified databases: also return chunks pulled in by relations declared at ingest (server default on) |
+| `--llm` | Unified databases: print the server-built `llm_prompt` verbatim, ready to inject into a model call |
 
 ```bash
 hydradb query "What did the team say about pricing?"
@@ -233,6 +235,26 @@ hydradb query "contract terms" --kind knowledge --mode thinking --max-results 20
 hydradb query "What does the user prefer?" --kind memory
 hydradb query "pricing AND enterprise" --operator and
 hydradb query "Who owns the rollout?" --title "Q3 Roadmap.md" --title "Smith, John"
+```
+
+On a **unified database** (see `database create --type unified`) the CLI never
+sends `type`, and the answer is the four-key unified body: `chunks[]`
+(`context_id`, `score`, `content`, `enrichment` as a plain string and
+`enrichment_kind` beside it, the declared category, either one omitted when
+empty), `graph[]` (`origin`, `path_summary` plus triplets),
+`forceful_relations[]` (chunks pulled in by relations declared at ingest, each
+`chunk` in the same shape as a `chunks[]` item) and `llm_prompt`, a markdown
+document (`# Query results`, `## Results`, `## Forceful relations`,
+`## Related facts`, `## Temporal facts`, `## Sources`) with numbered results
+to cite. The human view renders the first three, with graph paths grouped by
+`origin`: query paths (grown from the query's entities) apart from chunk
+relation paths (listed under the returned chunk they hang under). `--llm`
+prints the prompt on its own; `--output json` prints the body verbatim.
+
+```bash
+hydradb query "What plan is John on?" --llm | my-model-call
+hydradb --output json query "What plan is John on?" | jq '.chunks[].context_id'
+hydradb query "refund window" --no-follow-forceful-relations
 ```
 
 Every query prints a `request_id`. That is the only key `feedback` correlates
@@ -277,19 +299,19 @@ round trip.
 
 ### ingest
 
-Store a memory, knowledge text, or knowledge file(s). Defaults to `--kind memory`;
-file arguments are always knowledge sources.
+Store a memory, knowledge text, or knowledge file(s). On a split database it
+defaults to `--kind memory`, and file arguments are always knowledge sources.
 
 | Option | Description |
 |--------|-------------|
-| `--kind` | `memory` (default) or `knowledge` |
+| `--kind` | Split databases: `memory` (default) or `knowledge`. Not used on a unified database |
 | `--text` / `-t` | Text to ingest. Use `-` to read from stdin |
 | `--title` | Optional title |
-| `--source-id` | Client-assigned source identifier |
-| `--user-name` | User name (memory only) |
+| `--source-id` | Client-assigned source identifier (the `--context-id` on a unified database) |
+| `--user-name` | User name (split memory only) |
 | `--infer` / `--no-infer` | Extract insights and build the knowledge graph (default on) |
-| `--markdown` | Treat text as markdown (memory only) |
-| `--upsert` / `--no-upsert` | Update existing items with the same `source_id` (default on) |
+| `--markdown` | Treat text as markdown (split memory only) |
+| `--upsert` / `--no-upsert` | Update existing items with the same id (default on) |
 
 ```bash
 hydradb ingest --text "User prefers dark mode and weekly email summaries"
@@ -302,6 +324,33 @@ echo "piped note" | hydradb ingest
 `--text`, `--title`, `--source-id`, `--user-name`, `--markdown` and `--no-infer` do not
 apply to file ingest and are rejected rather than silently ignored.
 
+On a **unified database** `ingest` sends one JSON context item (exactly one of
+`--text` or `--conversation-file`) and never a `type`. Files, `--kind`,
+`--user-name` and `--markdown` are refused there with a message; these options
+apply there and are refused on a split database:
+
+| Option | Description |
+|--------|-------------|
+| `--conversation-file` | Path to a JSON list of `{role, content, name?}` turns (roles `user`, `assistant`, `system`) |
+| `--context-id` | Caller-assigned id for the item (server-generated when omitted) |
+| `--enrich` / `--no-enrich` | Extract facts and graph relations for the item (default on; `--no-infer` means the same) |
+| `--instructions` | Steer enrichment for this item |
+| `--happened-at` | The event date the item is about, `YYYY-MM-DD` |
+| `--attributes` | Declared, filterable attributes as a JSON object |
+| `--custom-attributes` | Free-form attributes as a JSON object |
+| `--category` | `auto`, `user_preference`, `business_knowledge` or `decision_trace` |
+| `--forceful-relation` | A context id this item is declared related to; repeatable |
+| `--acl` | A principal allowed to retrieve the item; repeatable |
+
+```bash
+hydradb ingest --text "Refund policy: 30-day window." --context-id policy-1 --title "Refund policy" \
+  --happened-at 2026-07-29 --attributes '{"team": "support"}' --category business_knowledge
+hydradb ingest --conversation-file ./chat.json --context-id chat-w1 --forceful-relation policy-1
+```
+
+The 202 lists each item as `results[].source_id`, which is its context id;
+poll it with `hydradb verify <context id>`.
+
 ---
 
 ### list / inspect / relations / subgraph / verify
@@ -310,7 +359,7 @@ Browse and read back what you have stored.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `list` | Lists ingested sources and memories | `--kind`, `--page`, `--page-size` |
+| `list` | Lists ingested sources and memories (`--kind` is for split databases only) | `--kind`, `--page`, `--page-size` |
 | `inspect <id>` | Fetches a source's content or a presigned download URL | `--mode` (`content`, `url`, `both`) |
 | `relations <id>` | Knowledge graph triplets linked to a source | `--kind`, `--limit` |
 | `subgraph <id>` | Everything connected to one item — its thread, replies, parents, children, links — traversed breadth-first | `--kind`, `--depth`, `--max-sources` |
@@ -332,8 +381,9 @@ hydradb verify source_abc123
 
 ### delete
 
-Removes memories or knowledge sources by ID. Defaults to `--kind knowledge`, and prompts
-for confirmation unless `--yes` is passed.
+Removes memories or knowledge sources by ID. On a split database it defaults to
+`--kind knowledge`; on a unified database no kind is sent and `--kind` is refused.
+Prompts for confirmation unless `--yes` is passed.
 
 ```bash
 hydradb delete source_abc123 --yes
@@ -351,8 +401,8 @@ Create and manage databases.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `database create <database>` | Provisions a new database | — |
-| `database list` | Lists all databases for the authenticated user | — |
+| `database create <database>` | Provisions a new database; `--type unified` gives it one corpus (no `--kind` on later commands) instead of the default `split` layout | `--type` |
+| `database list` | Lists all databases for the authenticated user, with each one's type (`split` or `unified`) | - |
 | `database collections [database]` | Lists collections within a database | — |
 | `database stats [database]` | Row-count statistics | — |
 | `database readiness [database]` | Whether the database is ready for ingestion | — |
@@ -361,6 +411,7 @@ Create and manage databases.
 
 ```bash
 hydradb database create my-new-database
+hydradb database create my-unified-database --type unified
 hydradb database readiness
 hydradb database collections
 hydradb database delete old-database --yes
