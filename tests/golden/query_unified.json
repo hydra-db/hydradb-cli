@@ -26,6 +26,7 @@
   ],
   "graph": [
     {
+      "origin": "query_path",
       "triplets": [
         {
           "source": {"entity_id": "ent_a3f", "name": "John"},
@@ -40,9 +41,25 @@
         }
       ],
       "path_summary": "John is on the Pro plan since June 2026."
+    },
+    {
+      "origin": "chunk_relation",
+      "triplets": [
+        {
+          "source": {"entity_id": "ent_b21", "name": "Refund policy"},
+          "relation": {
+            "predicate": "allows refunds within",
+            "context": "Refund policy: 30-day window.",
+            "relationship_id": "rel_2",
+            "chunk_id": "ck_a10"
+          },
+          "target": {"entity_id": "ent_c30", "name": "30 days"}
+        }
+      ],
+      "path_summary": "The refund policy allows refunds within 30 days."
     }
   ],
-  "relations": [
+  "forceful_relations": [
     {
       "via": {"from": "linear-PRO-1169", "to": "linear-PRO-1169-comment-4"},
       "chunk": {
@@ -54,5 +71,5 @@
       }
     }
   ],
-  "llm_prompt": "=== CONTEXT ===\nCite anything you use from this context with its bracketed label, e.g. [1].\n\n[1] context_id: chat-2026-07-29#w2\nuser: Keep answers short please\nassistant: Got it.\n\n[2] context_id: policy-1\nRefund policy: 30-day window.\n\n=== RELATED CONTEXT ===\n[R1] context_id: linear-PRO-1169-comment-4\nComment 4: shipped the fix in #1625.\n\n=== GRAPH ===\n[P1] John is on the Pro plan since June 2026.\n    John -> subscribed to -> Pro plan [1]"
+  "llm_prompt": "=== CONTEXT ===\nCite anything you use from this context with its bracketed label, e.g. [1].\n\n[1] context_id: chat-2026-07-29#w2\nuser: Keep answers short please\nassistant: Got it.\n\n[2] context_id: policy-1\nRefund policy: 30-day window.\n\n=== FORCEFUL RELATIONS ===\nLinked to a result by the author at ingest time (forceful_relations), not by relevance to this query.\n\n[R1] context_id: linear-PRO-1169-comment-4\nComment 4: shipped the fix in #1625.\n\n=== GRAPH ===\n[P1] John is on the Pro plan since June 2026.\n    John -> subscribed to -> Pro plan [1]\n\n[P2] The refund policy allows refunds within 30 days.\n    Refund policy -> allows refunds within -> 30 days [2]"
 }

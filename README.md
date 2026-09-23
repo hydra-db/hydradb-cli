@@ -240,9 +240,12 @@ hydradb query "Who owns the rollout?" --title "Q3 Roadmap.md" --title "Smith, Jo
 On a **unified database** (see `database create --type unified`) the CLI never
 sends `type`, and the answer is the four-key unified body: `chunks[]`
 (`context_id`, `score`, `content`, `enrichment.text`, `enrichment.kind`),
-`graph[]` (`path_summary` plus triplets), `relations[]` (chunks pulled in by
-declared relations) and `llm_prompt`. The human view renders the first three;
-`--llm` prints the prompt on its own; `--output json` prints the body verbatim.
+`graph[]` (`origin`, `path_summary` plus triplets), `forceful_relations[]`
+(chunks pulled in by relations declared at ingest) and `llm_prompt`. The human
+view renders the first three, with graph paths grouped by `origin`: query paths
+(grown from the query's entities) apart from chunk relation paths (listed under
+the returned chunk they hang under). `--llm` prints the prompt on its own;
+`--output json` prints the body verbatim.
 
 ```bash
 hydradb query "What plan is John on?" --llm | my-model-call

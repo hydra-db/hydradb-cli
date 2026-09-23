@@ -100,7 +100,7 @@ def _is_unified(wrapper: Any, database: str) -> bool:
 
     One memoised ``GET /databases`` probe per wrapper. A successful probe that
     does not list ``database`` reads as split, which is what every pre-PRO-1618
-    database is; a FAILED probe is the error it is, not a guess — guessing
+    database is; a FAILED probe is the error it is, not a guess: guessing
     split would send the split request shape to a database that may be
     unified. Compared by value so a mocked wrapper (whose ``layout`` returns a
     MagicMock) reads as split too.
@@ -166,11 +166,15 @@ def _feedback_hint(r: dict) -> str:
 def _is_unified_query_body(r: dict) -> bool:
     """Shape detection (contract rule 4).
 
-    A unified body carries ``llm_prompt`` and a ``graph`` ARRAY; a split body
-    carries ``chunk_content``/``graph_context``. Stored logs and split databases
-    keep producing the old shape, so the layout probe alone cannot decide this.
+    A unified body carries ``llm_prompt``, a ``graph`` ARRAY and a
+    ``forceful_relations`` ARRAY; a split body carries ``chunk_content``/
+    ``graph_context``. A split body can carry ``graph`` and
+    ``forceful_relations`` too, but as objects (``{paths}``,
+    ``{declared, inferred}``), so both are told apart by type, never by the key
+    being there. Stored logs and split databases keep producing the old shape,
+    so the layout probe alone cannot decide this.
     """
-    return "llm_prompt" in r or isinstance(r.get("graph"), list)
+    return "llm_prompt" in r or isinstance(r.get("graph"), list) or isinstance(r.get("forceful_relations"), list)
 
 
 def _preview(text: str, limit: int) -> str:
@@ -182,9 +186,9 @@ def _pct(score: Any) -> str:
 
 
 def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
-    """One ``chunks[]``/``relations[].chunk`` item: context_id, score, content,
-    enrichment text and kind, temporal facts. Content is API data, so it is
-    rendered as plain Text and never parsed as markup."""
+    """One ``chunks[]`` item: context_id, score, content, enrichment text and
+    kind, temporal facts. Content is API data, so it is rendered as plain Text
+    and never parsed as markup."""
     score = _pct(chunk.get("score"))
     score_str = f" • {score}" if score else ""
     context_id = chunk.get("context_id") or ""
@@ -210,62 +214,147 @@ def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
     )
 
 
+#: ``graph[].origin`` (PRO-1618): which retrieval lane found a path.
+#: ``query_path`` was grown from the entities in the query; ``chunk_relation``
+#: is the neighbourhood of a chunk that ranked.
+_ORIGIN_QUERY_PATH = "query_path"
+_ORIGIN_CHUNK_RELATION = "chunk_relation"
+
+
+def _list_field(r: dict, key: str) -> list:
+    """``r[key]`` when it is a list, else ``[]``. The unified keys are read by
+    type, never by presence: a split body has a ``graph`` and a
+    ``forceful_relations`` too, but as objects."""
+    value = r.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _chunk_labels(chunks: list, forceful: list) -> dict[str, tuple[str, str]]:
+    """``chunk_id -> (label, context_id)`` for every chunk the body returned:
+    ``1``, ``2``... for ``chunks[]`` and ``R1``, ``R2``... for
+    ``forceful_relations[].chunk``, the labels ``llm_prompt`` cites them by.
+    First write wins, as on the server: a chunk that is both a result and a
+    forceful relation is cited as the result. This is how a graph hop is tied
+    to its chunk and context: by ``relation.chunk_id``, never by parsing it."""
+    labels: dict[str, tuple[str, str]] = {}
+    entries = [(str(i), chunk) for i, chunk in enumerate(chunks, 1)]
+    entries += [(f"R{i}", rel.get("chunk") or {}) for i, rel in enumerate(forceful, 1)]
+    for label, chunk in entries:
+        chunk_id = chunk.get("chunk_id")
+        if chunk_id and chunk_id not in labels:
+            labels[chunk_id] = (label, chunk.get("context_id") or "")
+    return labels
+
+
+def _hop_chunk(triplet: dict, labels: dict[str, tuple[str, str]]) -> tuple[str, str] | None:
+    return labels.get((triplet.get("relation") or {}).get("chunk_id") or "")
+
+
+def _hop_line(triplet: dict, labels: dict[str, tuple[str, str]], *, cite: bool) -> str:
+    src = (triplet.get("source") or {}).get("name") or "?"
+    predicate = (triplet.get("relation") or {}).get("predicate") or "related to"
+    tgt = (triplet.get("target") or {}).get("name") or "?"
+    line = f"{src} -> {predicate} -> {tgt}"
+    hit = _hop_chunk(triplet, labels) if cite else None
+    return f"{line} [{hit[0]}]" if hit else line
+
+
+def _graph_panels(graph: list, labels: dict[str, tuple[str, str]]) -> list[Panel]:
+    """``graph[]`` grouped by ``origin``, the way the split body kept
+    ``query_paths`` and ``chunk_relations`` apart.
+
+    Query paths are listed with each hop citing the returned chunk it was
+    extracted from, when there is one. Chunk relations are listed under the
+    chunk they hang under: every hop's ``relation.chunk_id`` is that chunk.
+    A path with no known origin is still shown, in a group of its own, rather
+    than guessed into one. ``P`` labels are positions in ``graph[]``, which is
+    what ``llm_prompt`` numbers paths by.
+    """
+    query_rows: list[list[str]] = []
+    chunk_rows: list[list[str]] = []
+    other_rows: list[list[str]] = []
+    for i, path in enumerate(graph, 1):
+        if not isinstance(path, dict):
+            continue
+        triplets = [t for t in path.get("triplets") or [] if isinstance(t, dict)]
+        summary = path.get("path_summary") or ""
+        origin = path.get("origin")
+        if origin == _ORIGIN_CHUNK_RELATION:
+            under: list[str] = []
+            for triplet in triplets:
+                hit = _hop_chunk(triplet, labels)
+                cell = f"[{hit[0]}] {hit[1]}".rstrip() if hit else ""
+                if cell and cell not in under:
+                    under.append(cell)
+            hops = "\n".join(_hop_line(t, labels, cite=False) for t in triplets)
+            chunk_rows.append([f"P{i}", "\n".join(under), summary, hops])
+            continue
+        hops = "\n".join(_hop_line(t, labels, cite=True) for t in triplets)
+        (query_rows if origin == _ORIGIN_QUERY_PATH else other_rows).append([f"P{i}", summary, hops])
+
+    groups = (
+        (query_rows, "query path(s)", ("#", "Path", "Triplets")),
+        (chunk_rows, "chunk relation path(s)", ("#", "Chunk", "Path", "Triplets")),
+        (other_rows, "path(s) with no known origin", ("#", "Path", "Triplets")),
+    )
+    return [
+        Panel(
+            make_table(*columns, rows=rows),
+            title=f"[bold cyan]/// Graph: {len(rows)} {what}[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+        for rows, what, columns in groups
+        if rows
+    ]
+
+
+def _forceful_relations_panel(forceful: list) -> Panel:
+    """``forceful_relations[]``: chunks in the result because the caller
+    declared a relation at ingest, with the declared edge (``via``) that
+    pulled each one in. ``R`` labels match ``llm_prompt``'s."""
+    rows = []
+    for i, rel in enumerate(forceful, 1):
+        via = rel.get("via") or {}
+        chunk = rel.get("chunk") or {}
+        rows.append(
+            [
+                f"R{i}",
+                via.get("from") or "",
+                via.get("to") or chunk.get("context_id") or "",
+                _pct(chunk.get("score")),
+                _preview(chunk.get("content") or "", 120),
+            ]
+        )
+    return Panel(
+        make_table("#", "From", "To", "Score", "Content", rows=rows),
+        title=f"[bold cyan]/// Forceful relations: {len(forceful)} chunk(s)[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 1),
+    )
+
+
 def _format_unified_query_result(r: dict, request_id: str | None = None):
     """The four-key unified body (PRO-1618) for a person: ``chunks[]`` as
-    panels, ``graph[]`` as a path table (summary + triplets), ``relations[]``
-    as a table of what was pulled in by declared relations, and the feedback
-    hint. ``llm_prompt`` is not shown here: ``--llm`` prints it verbatim."""
-    chunks = r.get("chunks") or []
-    graph = r.get("graph") or []
-    relations = r.get("relations") or []
+    panels, ``graph[]`` as path tables grouped by ``origin``,
+    ``forceful_relations[]`` as a table of what declared relations pulled in
+    (no section when there are none), and the feedback hint. ``llm_prompt`` is
+    not shown here: ``--llm`` prints it verbatim."""
+    chunks = _list_field(r, "chunks")
+    graph = _list_field(r, "graph")
+    forceful = [f for f in _list_field(r, "forceful_relations") if isinstance(f, dict)]
     hint = _feedback_hint({"request_id": request_id}) if request_id else ""
-    if not chunks and not graph and not relations:
+    if not chunks and not graph and not forceful:
         return "[dim]No relevant results found.[/dim]" + hint
 
     parts: list[Any] = [Text(f"  Found {len(chunks)} result(s)", style="bold")]
     for i, chunk in enumerate(chunks, 1):
         parts.append(_unified_chunk_panel(chunk, str(i)))
 
-    if graph:
-        rows = []
-        for i, path in enumerate(graph, 1):
-            triplets = []
-            for triplet in path.get("triplets") or []:
-                src = (triplet.get("source") or {}).get("name") or "?"
-                predicate = (triplet.get("relation") or {}).get("predicate") or "related to"
-                tgt = (triplet.get("target") or {}).get("name") or "?"
-                triplets.append(f"{src} -> {predicate} -> {tgt}")
-            rows.append([f"P{i}", path.get("path_summary") or "", "\n".join(triplets)])
-        parts.append(
-            Panel(
-                make_table("#", "Path", "Triplets", rows=rows),
-                title=f"[bold cyan]/// Graph: {len(graph)} path(s)[/bold cyan]",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        )
+    parts.extend(_graph_panels(graph, _chunk_labels(chunks, forceful)))
 
-    if relations:
-        rows = []
-        for rel in relations:
-            via = rel.get("via") or {}
-            chunk = rel.get("chunk") or {}
-            rows.append(
-                [
-                    via.get("from") or "",
-                    via.get("to") or chunk.get("context_id") or "",
-                    _pct(chunk.get("score")),
-                    _preview(chunk.get("content") or "", 120),
-                ]
-            )
-        parts.append(
-            Panel(
-                make_table("From", "To", "Score", "Content", rows=rows),
-                title=f"[bold cyan]/// Related: {len(relations)} chunk(s) via declared relations[/bold cyan]",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        )
+    if forceful:
+        parts.append(_forceful_relations_panel(forceful))
 
     if hint:
         parts.append(Text.from_markup(hint.lstrip("\n")))
@@ -291,9 +380,9 @@ def _print_unified_query(body: dict, request_id: str | None, *, llm: bool) -> No
 
 def _format_query_result(r: dict):
     if _is_unified_query_body(r):
-        # A unified body reached the split path (a failed layout probe sends a
-        # type-less SDK query, which a unified database answers in its own
-        # shape). Render it as what it is.
+        # A unified body reached the split path (a server that does not list a
+        # database's layout still answers a type-less query on a unified one
+        # in the unified shape). Render it as what it is.
         return _format_unified_query_result(r, r.get("request_id"))
     chunks = r.get("chunks") or []
     if not chunks:

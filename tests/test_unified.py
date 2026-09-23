@@ -85,7 +85,7 @@ INGEST_202 = {
     "failed_count": 0,
 }
 
-EMPTY_BODY = {"chunks": [], "graph": [], "relations": [], "llm_prompt": ""}
+EMPTY_BODY = {"chunks": [], "graph": [], "forceful_relations": [], "llm_prompt": ""}
 
 
 @pytest.fixture(autouse=True)
@@ -166,6 +166,65 @@ def _capture_post(monkeypatch, status: int = 200, body: dict | None = None) -> _
     capture = _Capture(status, body)
     monkeypatch.setattr("hydradb_cli.hydra.client.httpx.post", capture)
     return capture
+
+
+class _WatchedMeta(dict):
+    """An envelope ``meta`` that records every key read from it (``*`` for a
+    read of the whole mapping), so a test can pin what the unified path reads."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.read: list[str] = []
+
+    def __getitem__(self, key):
+        self.read.append(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self.read.append(key)
+        return super().get(key, default)
+
+    def __contains__(self, key):
+        self.read.append(key)
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self.read.append("*")
+        return super().__iter__()
+
+    def keys(self):
+        self.read.append("*")
+        return super().keys()
+
+    def items(self):
+        self.read.append("*")
+        return super().items()
+
+    def values(self):
+        self.read.append("*")
+        return super().values()
+
+
+def _path(origin: str | None, chunk_id: str, source: str, target: str, summary: str) -> dict:
+    """One ``graph[]`` path of a single hop extracted from ``chunk_id``."""
+    path: dict = {
+        "triplets": [
+            {
+                "source": {"entity_id": f"ent_{source}", "name": source},
+                "relation": {
+                    "predicate": "links",
+                    "context": f"{source} links {target}.",
+                    "relationship_id": f"rel_{source}",
+                    "chunk_id": chunk_id,
+                },
+                "target": {"entity_id": f"ent_{target}", "name": target},
+            }
+        ],
+        "path_summary": summary,
+    }
+    if origin is not None:
+        path["origin"] = origin
+    return path
 
 
 # ── the layout probe ─────────────────────────────────────────────────────────
@@ -386,7 +445,7 @@ class TestUnifiedQueryCommand:
             runner.invoke(app, ["query", "pro plan", "--follow-forceful-relations"])
         assert w.context.query_unified.call_args.kwargs["follow_forceful_relations"] is True
 
-    def test_human_output_renders_chunks_graph_and_relations(self):
+    def test_human_output_renders_chunks_graph_and_forceful_relations(self):
         _auth()
         w = _mock("unified", **{"context.query_unified": (UNIFIED_BODY, "req-1")})
         with _patch(w):
@@ -400,14 +459,22 @@ class TestUnifiedQueryCommand:
         assert "enrichment (user_preference): User prefers short, bullet-point answers." in out
         assert "policy-1" in out and "61%" in out and "Refund policy: 30-day window." in out
         assert "temporal: John lives in Austin" in out and "[2026-06-01 to 2026-07-01]" in out
-        # graph[]: path_summary + triplets
-        assert "/// Graph: 1 path(s)" in out
+        # graph[]: grouped by origin, path_summary + triplets. A query-path hop
+        # cites the returned chunk it came from; a chunk relation is listed
+        # under the chunk it hangs under.
+        assert "/// Graph: 1 query path(s)" in out
         assert "John is on the Pro plan since June 2026." in out
-        assert "John -> subscribed to -> Pro plan" in out
-        # relations[]: via from/to and the pulled-in chunk
-        assert "/// Related: 1 chunk(s) via declared relations" in out
-        assert "linear-PRO-1169" in out and "linear-PRO-1169-comment-4" in out
+        assert "John -> subscribed to -> Pro plan [1]" in out
+        assert "/// Graph: 1 chunk relation path(s)" in out
+        assert "[2] policy-1" in out
+        assert "The refund policy allows refunds within 30 days." in out
+        assert "Refund policy -> allows refunds within -> 30 days" in out
+        assert out.index("/// Graph: 1 query path(s)") < out.index("/// Graph: 1 chunk relation path(s)")
+        # forceful_relations[]: R label, via from/to and the pulled-in chunk
+        assert "/// Forceful relations: 1 chunk(s)" in out
+        assert "R1" in out and "linear-PRO-1169" in out and "linear-PRO-1169-comment-4" in out
         assert "shipped the fix" in out and "42%" in out
+        assert "Related" not in out
         # the prompt is not dumped into the structured view
         assert "=== CONTEXT ===" not in out
         # feedback stays reachable
@@ -491,6 +558,34 @@ class TestUnifiedQueryCommand:
         assert "follow_forceful_relations" not in kwargs and "llm" not in kwargs
         w.context.query_unified.assert_not_called()
 
+    def test_only_the_request_id_is_read_from_the_unified_meta(self, monkeypatch):
+        """A unified /query ``meta`` has no ``tenant_id``, ``sub_tenant_id`` or
+        ``source_type`` (PRO-1618): nothing on the unified path may read them,
+        and ``request_id`` is the one key it needs, in every output mode."""
+        monkeypatch.setenv("HYDRADB_API_KEY", "x")
+        monkeypatch.setenv("HYDRADB_DATABASE", "db_test")
+        meta = _WatchedMeta(
+            {"request_id": "req-7", "api_version": "2", "latency_ms": 9, "database": "db_test", "collection": "c"}
+        )
+        wrapper = _real_wrapper(
+            lambda r: httpx.Response(200, json=_databases_envelope([{"database": "db_test", "type": "unified"}]))
+        )
+        monkeypatch.setattr(wrapper, "_raw_post_with_meta", lambda path, *, json_body: (UNIFIED_BODY, meta))
+        outputs = {}
+        for mode, argv in (
+            ("human", ["query", "pro plan"]),
+            ("llm", ["query", "pro plan", "--llm"]),
+            ("json", ["--output", "json", "query", "pro plan"]),
+        ):
+            with patch("hydradb_cli.commands._impl.get_wrapper", return_value=wrapper):
+                result = runner.invoke(app, argv, env=_WIDE)
+            assert result.exit_code == 0, (mode, result.output)
+            outputs[mode] = result
+        assert set(meta.read) == {"request_id"}, meta.read
+        assert "hydradb feedback req-7" in outputs["human"].output
+        assert "req-7" in outputs["llm"].stderr
+        assert json.loads(outputs["json"].stdout) == UNIFIED_BODY
+
     def test_end_to_end_json_is_the_server_body_verbatim(self, monkeypatch):
         """Real wrapper: the probe over the SDK transport, the query over the raw path."""
         monkeypatch.setenv("HYDRADB_API_KEY", "x")
@@ -519,9 +614,9 @@ class TestUnifiedQueryCommand:
 
 class TestQueryRenderer:
     @staticmethod
-    def _render(renderable) -> str:
+    def _render(renderable, width: int = 120) -> str:
         buffer = io.StringIO()
-        Console(file=buffer, width=120, force_terminal=False, no_color=True).print(renderable)
+        Console(file=buffer, width=width, force_terminal=False, no_color=True).print(renderable)
         return buffer.getvalue()
 
     def test_shape_detection_is_by_body_not_by_layout(self):
@@ -531,20 +626,77 @@ class TestQueryRenderer:
         assert not _impl._is_unified_query_body({"chunks": []})
         assert not _impl._is_unified_query_body({"chunks": [], "graph_context": {"query_paths": []}})
 
+    def test_a_split_body_carrying_graph_and_forceful_relations_objects_is_split(self):
+        # A split body carries `graph` ({paths}) and `forceful_relations`
+        # ({declared, inferred}) beside graph_context: the unified keys, as
+        # objects. Shape detection goes by type, never by the key being there.
+        split = {
+            **SPLIT_BODY,
+            "graph_context": {"query_paths": [], "chunk_relations": []},
+            "graph": {"paths": []},
+            "forceful_relations": {"declared": [], "inferred": []},
+        }
+        assert not _impl._is_unified_query_body(split)
+        assert _impl._is_unified_query_body({"chunks": [], "forceful_relations": []})
+        out = self._render(_impl._format_query_result(split))
+        assert "Pricing is $29/mo" in out
+        assert "/// Forceful relations" not in out and "/// Graph" not in out
+
     def test_the_split_golden_renders_through_the_split_renderer_unchanged(self):
         out = self._render(_impl._format_query_result(SPLIT_BODY))
         assert "Found 1 result(s)" in out
         assert "92%" in out and "Pricing Doc" in out and "Pricing is $29/mo" in out
-        for marker in ("enrichment", "/// Graph", "/// Related", "context_id"):
+        for marker in ("enrichment", "/// Graph", "/// Forceful relations", "context_id"):
             assert marker not in out, marker
 
     def test_a_unified_body_through_the_shared_entry_point_renders_unified(self):
-        # A failed layout probe sends a type-less SDK query; a unified database
-        # answers in its own shape and the renderer must still read it.
+        # A server that does not list a database's layout still answers a
+        # type-less query on a unified one in the unified shape, and the
+        # renderer must still read it.
         out = self._render(_impl._format_query_result({**UNIFIED_BODY, "request_id": "req-2"}))
         assert "John -> subscribed to -> Pro plan" in out
         assert "enrichment (user_preference)" in out
         assert "req-2" in out
+
+    def test_the_forceful_relations_section_is_hidden_when_empty(self):
+        out = self._render(_impl._format_unified_query_result({**UNIFIED_BODY, "forceful_relations": []}))
+        assert "Found 2 result(s)" in out and "/// Graph" in out
+        assert "Forceful relations" not in out and "linear-PRO-1169" not in out
+
+    def test_the_old_relations_key_is_not_read(self):
+        # `relations` was renamed `forceful_relations`; there is no fallback.
+        old = {key: value for key, value in UNIFIED_BODY.items() if key != "forceful_relations"}
+        old["relations"] = UNIFIED_BODY["forceful_relations"]
+        out = self._render(_impl._format_unified_query_result(old))
+        assert "Found 2 result(s)" in out
+        assert "Forceful relations" not in out and "shipped the fix" not in out
+        only_old = {"chunks": [], "graph": [], "relations": UNIFIED_BODY["forceful_relations"], "llm_prompt": ""}
+        assert "No relevant results found." in self._render(_impl._format_unified_query_result(only_old))
+
+    def test_graph_is_grouped_by_origin_with_positional_labels(self):
+        body = {
+            **UNIFIED_BODY,
+            "graph": [
+                _path("chunk_relation", "ck_c4", "Comment", "Fix", "The comment names the fix."),
+                _path("query_path", "ck_not_returned", "Alpha", "Beta", "Alpha links Beta."),
+                _path(None, "ck_9f2", "Gamma", "Delta", "Gamma links Delta."),
+            ],
+        }
+        out = _plain(self._render(_impl._format_unified_query_result(body), width=200))
+        # One group per origin, query paths first. P labels are positions in
+        # graph[], which is how llm_prompt numbers paths.
+        assert "/// Graph: 1 query path(s)" in out
+        assert re.search(r"P2\W+Alpha links Beta\.", out)
+        # a hop whose chunk is not in the result cites nothing
+        assert "Alpha -> links -> Beta" in out and "Alpha -> links -> Beta [" not in out
+        # a chunk relation hangs under the chunk its hops came from, here a
+        # forceful-relation chunk, by its R label
+        assert "/// Graph: 1 chunk relation path(s)" in out
+        assert re.search(r"P1\W+\[R1\] linear-PRO-1169-comment-4\W+The comment names the fix\.", out)
+        # a path with no origin is still shown, in its own group, not guessed into one
+        assert "/// Graph: 1 path(s) with no known origin" in out
+        assert re.search(r"P3\W+Gamma links Delta\.", out) and "Gamma -> links -> Delta [1]" in out
+        assert out.index("query path(s)") < out.index("chunk relation path(s)") < out.index("no known origin")
 
     def test_enrichment_with_only_a_kind_still_shows_the_kind(self):
         body = {

@@ -220,7 +220,7 @@ class _Databases(_Resource):
         Split is what a SUCCESSFUL probe reports: a database missing from
         ``details[]`` (an older server, or one that does not expose the
         field) is what every pre-PRO-1618 database is. A failed probe
-        propagates instead — answering split on a network, auth or parse
+        propagates instead: answering split on a network, auth or parse
         failure would send the split request shape to a database that may
         be unified. Failures are not memoised either: ``layouts()`` only
         caches a response it actually got, so the next call asks again.
@@ -394,10 +394,13 @@ class _Context(_Resource):
         switch by its deprecated alias and cannot be relied on to omit ``type``.
 
         Returns ``(body, request_id)``. ``body`` is the four-key response
-        (``chunks``, ``graph``, ``relations``, ``llm_prompt``) exactly as the
-        server sent it, with nothing added, so ``--output json`` prints it
-        verbatim; ``request_id`` is lifted from the envelope's ``meta`` for
+        (``chunks``, ``graph``, ``forceful_relations``, ``llm_prompt``) exactly
+        as the server sent it, with nothing added, so ``--output json`` prints
+        it verbatim; ``request_id`` is lifted from the envelope's ``meta`` for
         ``hydradb feedback``, which is the one thing the body cannot carry.
+        ``request_id`` is the ONLY key read from that ``meta``: a unified
+        response's meta has no ``tenant_id``, ``sub_tenant_id`` or
+        ``source_type``.
         """
         body = {
             key: value
