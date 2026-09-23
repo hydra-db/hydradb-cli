@@ -68,7 +68,7 @@ FULL_ITEM = {
     "attributes": {"team": "support"},
     "custom_attributes": {"source_app": "wiki"},
     "context_category": "business_knowledge",
-    "forceful_relations": {"ids": ["chat-w1"]},
+    "forceful_relations": {"context_ids": ["chat-w1"]},
     "acl": ["user_email:a@x.com", "domain:acme.com"],
 }
 
@@ -383,9 +383,10 @@ class TestUnifiedIngestWrapper:
 
     def test_a_conversation_item_is_sent_as_given(self, monkeypatch):
         capture = _capture_post(monkeypatch, status=202, body={"success": True, "data": INGEST_202, "meta": {}})
-        turns = [{"role": "user", "content": "hi", "name": "soham"}, {"role": "assistant", "content": "hello"}]
-        _real_wrapper(_sdk_500).context.ingest_context([{"context_id": "chat-w1", "conversation": turns}])
-        assert capture.calls[0]["json"]["context"] == [{"context_id": "chat-w1", "conversation": turns}]
+        turns = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        item = {"context_id": "chat-w1", "user_name": "soham", "conversation": turns}
+        _real_wrapper(_sdk_500).context.ingest_context([item])
+        assert capture.calls[0]["json"]["context"] == [item]
 
     def test_refuses_an_item_with_both_or_neither_shape(self):
         w = _real_wrapper(_sdk_500)
@@ -531,15 +532,25 @@ class TestUnifiedQueryCommand:
         w.context.query.assert_not_called()
         w.context.query_unified.assert_not_called()
 
-    def test_deprecated_recall_aliases_are_refused_on_a_unified_database(self):
+    def test_deprecated_recall_aliases_search_the_one_corpus_on_a_unified_database(self):
+        # These aliases picked their kind themselves; the user never typed one,
+        # so on a unified database it is dropped rather than refused.
         _auth()
         for argv in (["recall", "full", "x"], ["recall", "preferences", "x"]):
-            w = _mock("unified")
+            w = _mock("unified", **{"context.query_unified": ({"chunks": [], "graph": []}, None)})
             with _patch(w):
                 result = runner.invoke(app, argv)
-            assert result.exit_code != 0, argv
-            assert "unified" in result.output
+            assert result.exit_code == 0, (argv, result.output)
             w.context.query.assert_not_called()
+            w.context.query_unified.assert_called_once()
+
+    def test_an_explicit_kind_is_still_refused_on_a_unified_database(self):
+        _auth()
+        w = _mock("unified")
+        with _patch(w):
+            result = runner.invoke(app, ["query", "x", "--kind", "memory"])
+        assert result.exit_code != 0 and "Re-run without --kind" in _plain(result.output)
+        w.context.query_unified.assert_not_called()
 
     def test_llm_and_follow_flags_are_refused_on_a_split_database(self):
         _auth()
@@ -809,7 +820,7 @@ class TestUnifiedIngestCommand:
     def test_conversation_file(self, tmp_path):
         _auth()
         turns = [
-            {"role": "user", "content": "Keep answers short please", "name": "soham"},
+            {"role": "user", "content": "Keep answers short please"},
             {"role": "assistant", "content": "Got it."},
             {"role": "system", "content": "Never store account numbers"},
         ]
@@ -817,10 +828,20 @@ class TestUnifiedIngestCommand:
         f.write_text(json.dumps(turns))
         w = _mock("unified", **{"context.ingest_context": INGEST_202})
         with _patch(w):
-            result = runner.invoke(app, ["ingest", "--conversation-file", str(f), "--context-id", "chat-w1"])
+            result = runner.invoke(
+                app, ["ingest", "--conversation-file", str(f), "--context-id", "chat-w1", "--user-name", "soham"]
+            )
         assert result.exit_code == 0, result.output
         item = w.context.ingest_context.call_args.args[0][0]
-        assert item == {"context_id": "chat-w1", "conversation": turns, "enrich": True, "upsert": True}
+        # The speaker is the item's user_name (hydradb-application#1653): a
+        # turn is exactly {role, content}.
+        assert item == {
+            "context_id": "chat-w1",
+            "conversation": turns,
+            "user_name": "soham",
+            "enrich": True,
+            "upsert": True,
+        }
         assert "conversation, 3 turn(s)" in _plain(result.output)
 
     def test_defaults_are_explicit_and_nothing_else_is_sent(self):
@@ -913,9 +934,9 @@ class TestUnifiedIngestCommand:
         w.context.ingest_many.assert_not_called()
         w.context.ingest_context.assert_not_called()
 
-    def test_kind_user_name_and_markdown_are_refused(self):
+    def test_kind_and_markdown_are_refused(self):
         _auth()
-        for extra in (["--kind", "memory"], ["--kind", "knowledge"], ["--user-name", "ada"], ["--markdown"]):
+        for extra in (["--kind", "memory"], ["--kind", "knowledge"], ["--markdown"]):
             w = _mock("unified")
             with _patch(w):
                 result = runner.invoke(app, ["ingest", "--text", "x", *extra])
@@ -941,7 +962,7 @@ class TestUnifiedIngestCommand:
             ([{"role": "bot", "content": "x"}], "conversation[0].role"),
             ([{"role": "user", "content": "x"}, {"role": "user", "content": ""}], "conversation[1].content"),
             ([{"role": "user", "content": "x", "extra": 1}], "unknown field"),
-            ([{"role": "user", "content": "x", "name": ""}], "conversation[0].name"),
+            ([{"role": "user", "content": "x", "name": "soham"}], "conversation[0] has a name"),
             (["not an object"], "conversation[0] must be an object"),
             ([], "non-empty JSON list"),
             ({"role": "user"}, "non-empty JSON list"),
@@ -1011,7 +1032,7 @@ class TestUnifiedIngestCommand:
                 ],
             )
         assert result.exit_code == 0, result.output
-        assert w.context.ingest_context.call_args.args[0][0]["forceful_relations"] == {"ids": ["a", "b"]}
+        assert w.context.ingest_context.call_args.args[0][0]["forceful_relations"] == {"context_ids": ["a", "b"]}
         w = _mock("unified")
         with _patch(w):
             result = runner.invoke(app, ["ingest", "--text", "x", "--forceful-relation", "  "])
@@ -1178,13 +1199,15 @@ class TestUnifiedReadAndDeleteCommands:
         kwargs = w.context.inspect.call_args.kwargs
         assert "kind" not in kwargs and "type" not in kwargs
 
-    def test_deprecated_memories_list_is_refused_on_a_unified_database(self):
+    def test_deprecated_memories_list_lists_the_one_corpus_on_a_unified_database(self):
         _auth()
-        w = _mock("unified")
+        w = _mock("unified", **{"context.list": {"sources": [{"id": "a", "title": "A", "type": "memory"}]}})
         with _patch(w):
             result = runner.invoke(app, ["memories", "list"])
-        assert result.exit_code != 0 and "unified" in result.output
-        w.context.list.assert_not_called()
+        assert result.exit_code == 0, result.output
+        assert w.context.list.call_args.kwargs["kind"] is None
+        # One corpus: no per-item kind column that would only mislead.
+        assert "Type" not in result.output and "│ memory" not in result.output
 
 
 # ── hydradb database create --type / list ────────────────────────────────────
@@ -1266,3 +1289,199 @@ class TestDatabaseLayoutCommands:
             result = runner.invoke(app, ["database", "list"], env=_WIDE)
         assert result.exit_code == 0, result.output
         assert any(" a " in line and "split" in line for line in _lines(result))
+
+
+# ── PRO-2196: probe fallback, strict item contract, caps ─────────────────────
+
+_REFUSED_AS_UNIFIED = HydraDBClientError(
+    400,
+    '{"success": false, "error": {"code": "CORPUS_TYPE_UNSUPPORTED", '
+    '"message": "type \\"memory\\" is not valid on a unified database"}}',
+)
+
+
+def _unknown(**returns):
+    """A mocked wrapper whose layout probe fails the way a busy server does."""
+    w = _mock("split", **returns)
+    w.databases.layout.side_effect = HydraDBClientError(503, "unavailable")
+    return w
+
+
+class TestLayoutProbeFallback:
+    def test_the_probe_has_a_short_budget_and_no_retries(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.path)
+            return httpx.Response(200, json=_databases_envelope([{"database": "a", "type": "unified"}]))
+
+        w = _real_wrapper(handler)
+        original = w._sdk.databases.list
+        calls = []
+
+        def spy(**kwargs):
+            calls.append(kwargs)
+            return original(**kwargs)
+
+        w._sdk.databases.list = spy
+        assert w.databases.layout("a") == "unified"
+        assert calls == [{"request_options": {"timeout_in_seconds": 5, "max_retries": 0}}]
+
+    def test_a_transient_probe_failure_sends_the_split_request_with_a_warning(self):
+        _auth()
+        w = _unknown(**{"context.query": {"chunks": []}})
+        with _patch(w):
+            result = runner.invoke(app, ["query", "x"])
+        assert result.exit_code == 0, result.output
+        w.context.query.assert_called_once()
+        w.context.query_unified.assert_not_called()
+        assert "Could not check whether 't1' is split or unified (HTTP 503)" in _plain(result.stderr)
+
+    def test_an_auth_failure_on_the_probe_is_still_reported(self):
+        _auth()
+        w = _mock("split")
+        w.databases.layout.side_effect = HydraDBClientError(401, "bad key")
+        with _patch(w):
+            result = runner.invoke(app, ["query", "x"])
+        assert result.exit_code != 0 and "Authentication failed" in result.output
+        w.context.query.assert_not_called()
+
+    def test_an_ingest_refused_as_unified_is_redone_as_one_context_item(self):
+        _auth()
+        w = _unknown(**{"context.ingest_context": INGEST_202})
+        w.context.ingest.side_effect = _REFUSED_AS_UNIFIED
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note", "--user-name", "ada", "--source-id", "n1"])
+        assert result.exit_code == 0, result.output
+        assert w.context.ingest.call_args.kwargs["kind"] == "memory"
+        item = w.context.ingest_context.call_args.args[0][0]
+        assert item == {"context_id": "n1", "text": "a note", "user_name": "ada", "enrich": True, "upsert": True}
+        assert "redoing the request in the unified shape" in _plain(result.stderr)
+
+    def test_the_sdk_paths_message_only_refusal_is_recognised(self):
+        # The SDK path keeps the server's message and drops its code.
+        _auth()
+        w = _unknown(**{"context.ingest_context": INGEST_202})
+        w.context.ingest.side_effect = HydraDBClientError(
+            400, 'type "memory" is not valid on a unified database: knowledge and memory are one corpus'
+        )
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note"])
+        assert result.exit_code == 0, result.output
+        w.context.ingest_context.assert_called_once()
+
+    def test_a_unified_body_the_sdk_cannot_parse_is_redone_as_a_unified_query(self):
+        _auth()
+        w = _unknown(**{"context.query_unified": ({"chunks": [], "llm_prompt": "# Query results"}, "req-1")})
+        w.context.query.side_effect = HydraDBClientError(200, "{'chunks': [], 'llm_prompt': '# Query results'}")
+        with _patch(w):
+            result = runner.invoke(app, ["query", "x"])
+        assert result.exit_code == 0, result.output
+        w.context.query_unified.assert_called_once()
+
+    def test_an_explicit_kind_refused_as_unified_is_explained_not_redone(self):
+        _auth()
+        w = _unknown()
+        w.context.ingest.side_effect = _REFUSED_AS_UNIFIED
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note", "--kind", "knowledge"])
+        assert result.exit_code != 0
+        assert "--kind does not apply" in _plain(result.output)
+        w.context.ingest_context.assert_not_called()
+
+    def test_a_deprecated_write_alias_refused_as_unified_points_at_ingest(self):
+        _auth()
+        w = _unknown()
+        w.context.ingest.side_effect = _REFUSED_AS_UNIFIED
+        with _patch(w):
+            result = runner.invoke(app, ["memories", "add", "--text", "a note"])
+        assert result.exit_code != 0
+        assert "hydradb ingest --text" in _plain(result.output)
+        w.context.ingest_context.assert_not_called()
+
+    def test_a_delete_refused_as_unified_is_redone_without_a_kind(self):
+        _auth()
+        w = _unknown()
+        w.context.delete.side_effect = [_REFUSED_AS_UNIFIED, {"success": True, "deleted_count": 1}]
+        with _patch(w):
+            result = runner.invoke(app, ["delete", "a1", "--yes"])
+        assert result.exit_code == 0, result.output
+        kinds = [c.kwargs["kind"] for c in w.context.delete.call_args_list]
+        assert kinds == ["knowledge", None]
+        assert "Deleted 1 item(s)" in _plain(result.output)
+
+    def test_unified_only_flags_need_a_known_layout(self):
+        _auth()
+        w = _unknown()
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note", "--context-id", "n1"])
+        assert result.exit_code != 0
+        assert "could not be checked just now" in _plain(result.output)
+        w.context.ingest.assert_not_called()
+        w.context.ingest_context.assert_not_called()
+
+    def test_llm_with_an_unknown_layout_goes_out_unified(self):
+        _auth()
+        w = _unknown(**{"context.query_unified": ({"chunks": [], "llm_prompt": "# Query results"}, None)})
+        with _patch(w):
+            result = runner.invoke(app, ["query", "x", "--llm"])
+        assert result.exit_code == 0, result.output
+        w.context.query.assert_not_called()
+        assert "# Query results" in result.stdout
+
+
+class TestStrictItemContract:
+    def test_user_name_is_sent_on_a_text_item(self):
+        _auth()
+        w = _mock("unified", **{"context.ingest_context": INGEST_202})
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "I prefer short answers", "--user-name", "Harsh"])
+        assert result.exit_code == 0, result.output
+        assert w.context.ingest_context.call_args.args[0][0]["user_name"] == "Harsh"
+
+    def test_the_202_id_is_read_from_id(self):
+        _auth()
+        body = {"success": True, "success_count": 1, "failed_count": 0, "results": [{"id": "n1", "status": "queued"}]}
+        w = _mock("unified", **{"context.ingest_context": body})
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note"])
+        assert result.exit_code == 0, result.output
+        assert "Context ID: n1 (queued)" in _plain(result.output)
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            (["--context-id", "a,b"], "no commas"),
+            (["--context-id", "x" * 101], "at most 100 characters"),
+            (["--title", "é" * 513], "at most 1024 bytes"),
+            (["--instructions", "x" * 4001], "at most 4000 characters"),
+        ],
+    )
+    def test_the_server_caps_are_checked_before_sending(self, extra, message):
+        _auth()
+        w = _mock("unified")
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "a note", *extra])
+        assert result.exit_code != 0
+        assert message in _plain(result.output)
+        w.context.ingest_context.assert_not_called()
+
+    def test_text_over_one_mebibyte_is_refused(self):
+        _auth()
+        w = _mock("unified")
+        with _patch(w):
+            result = runner.invoke(app, ["ingest", "--text", "x" * ((1 << 20) + 1)])
+        assert result.exit_code != 0
+        assert "Split it into several items" in _plain(result.output)
+        w.context.ingest_context.assert_not_called()
+
+
+class TestDatabaseCreateDefault:
+    def test_create_without_type_says_the_server_picks(self):
+        _auth()
+        w = _mock("split", **{"databases.create": {"status": "accepted"}})
+        with _patch(w):
+            result = runner.invoke(app, ["database", "create", "new-db"])
+        assert result.exit_code == 0, result.output
+        assert w.databases.create.call_args.kwargs["layout"] is None
+        assert "the server's default layout" in _plain(result.output)

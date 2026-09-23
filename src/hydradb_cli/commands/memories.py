@@ -52,6 +52,7 @@ def list_memories(
     warn_deprecated("memories list", "list --kind memory")
     _impl.do_list(
         kind="memory",
+        kind_implied=True,
         acl=list(acl) if acl else None,
         tenant_id=tenant_id,
         sub_tenant_id=sub_tenant_id,
@@ -70,4 +71,4 @@ def delete(
     warn_deprecated("memories delete", "delete --kind memory")
     if not confirm:
         typer.confirm(f"Delete memory '{memory_id}'? This action is irreversible.", abort=True)
-    _impl.do_delete([memory_id], kind="memory", tenant_id=tenant_id, sub_tenant_id=sub_tenant_id)
+    _impl.do_delete([memory_id], kind="memory", tenant_id=tenant_id, sub_tenant_id=sub_tenant_id, kind_implied=True)

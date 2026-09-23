@@ -62,6 +62,12 @@ VALID_CATEGORIES = {"auto", "user_preference", "business_knowledge", "decision_t
 VALID_ROLES = {"user", "assistant", "system"}
 # happened_at is a calendar date, YYYY-MM-DD only: no time, no zone.
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# The server's per-item caps on a unified ingest (hydradb-application#1657),
+# checked locally so an item it would refuse is named before the round trip.
+UNIFIED_MAX_TEXT_BYTES = 1 << 20
+UNIFIED_MAX_TITLE_BYTES = 1024
+UNIFIED_MAX_INSTRUCTIONS_CHARS = 4000
+UNIFIED_MAX_CONTEXT_ID_CHARS = 100
 
 _STATUS_LABELS = {
     "queued": "queued",
@@ -95,30 +101,100 @@ def _execute(spinner_msg: str, call: Callable[[], Any]) -> Any:
 # ── storage layout (PRO-1618) ────────────────────────────────────────────────
 
 
-def _is_unified(wrapper: Any, database: str) -> bool:
-    """Whether ``database`` is a unified database.
+#: The layout probe could not answer (network, timeout, 429 or 5xx). The
+#: command then goes out in the split shape, which is what every database
+#: predating PRO-1618 takes and what the CLI sent before layouts existed, and
+#: is redone in the unified shape if the database refuses it as unified.
+LAYOUT_UNKNOWN = "unknown"
+
+
+def _probe_failure_is_transient(e: HydraDBClientError) -> bool:
+    """A probe failure the command itself may not hit: the server could not
+    answer the layout question just now. An auth or permission failure is not
+    one; the command's own call would fail the same way, so it is reported."""
+    return e.status_code == 0 or e.status_code == 429 or e.status_code >= 500
+
+
+def _layout(wrapper: Any, database: str) -> str:
+    """``unified``, ``split`` or ``unknown`` for ``database``.
 
     One memoised ``GET /databases`` probe per wrapper. A successful probe that
-    does not list ``database`` reads as split, which is what every pre-PRO-1618
-    database is; a FAILED probe is the error it is, not a guess: guessing
-    split would send the split request shape to a database that may be
-    unified. Compared by value so a mocked wrapper (whose ``layout`` returns a
-    MagicMock) reads as split too.
-    Every command branches on THIS, never on a request flag: a unified database
-    never receives ``type``, and a split one keeps every existing call as is.
+    does not list ``database`` reads as split, which is what every
+    pre-PRO-1618 database is. A transient probe failure reads as unknown, with
+    a warning on stderr; any other failure is the error it is. Compared by
+    value so a mocked wrapper (whose ``layout`` returns a MagicMock) reads as
+    split. Every command branches on THIS, never on a request flag: a unified
+    database never receives ``type``, and a split one keeps every existing
+    call as is.
     """
     try:
-        return wrapper.databases.layout(database) == LAYOUT_UNIFIED
+        return LAYOUT_UNIFIED if wrapper.databases.layout(database) == LAYOUT_UNIFIED else LAYOUT_SPLIT
     except HydraDBClientError as e:
-        handle_api_error(e)
+        if not _probe_failure_is_transient(e):
+            handle_api_error(e)
+        reason = f"HTTP {e.status_code}" if e.status_code else "no response"
     except httpx.RequestError as e:
-        handle_network_error(e)
+        reason = type(e).__name__
+    err_console.print(
+        f"  [hydra.warning]![/hydra.warning] Could not check whether '{escape(database)}' is split or unified "
+        f"({escape(reason)}); sending the split request, and redoing it as unified if the database says it is."
+    )
+    return LAYOUT_UNKNOWN
+
+
+def _is_unified(wrapper: Any, database: str) -> bool:
+    """Whether ``database`` is known to be unified (see :func:`_layout`)."""
+    return _layout(wrapper, database) == LAYOUT_UNIFIED
 
 
 def database_layout(tenant_id: str | None) -> tuple[str, str]:
-    """The database a command is about to touch and its layout, ``unified`` or ``split``."""
+    """The database a command is about to touch and its layout: ``unified``, ``split`` or ``unknown``."""
     tid = require_tenant_id(tenant_id)
-    return tid, (LAYOUT_UNIFIED if _is_unified(get_wrapper(), tid) else LAYOUT_SPLIT)
+    return tid, _layout(get_wrapper(), tid)
+
+
+def _refused_as_unified(e: HydraDBClientError) -> bool:
+    """The server's answer to a split-shaped call on a unified database.
+
+    Either a refusal (400 ``CORPUS_TYPE_UNSUPPORTED``; the SDK path keeps only
+    the message, so that is matched too) or, for a type-less query, a 200
+    carrying the unified body, which the SDK's split response model cannot
+    parse."""
+    detail = e.detail or ""
+    if e.status_code == 400:
+        return "CORPUS_TYPE_UNSUPPORTED" in detail or "is not valid on a unified database" in detail
+    return e.status_code == 200 and "llm_prompt" in detail
+
+
+def _execute_or_unified(
+    spinner_msg: str,
+    call: Callable[[], Any],
+    layout: str,
+    database: str,
+    on_unified: Callable[[], None],
+) -> Any:
+    """:func:`_execute`, except that when the layout is unknown and the
+    database refuses the split call as unified, ``on_unified`` runs instead
+    (it redoes the command in the unified shape, or explains why it cannot)
+    and :data:`UNIFIED_DONE` is returned. With a known layout this is exactly
+    :func:`_execute`."""
+    if layout != LAYOUT_UNKNOWN:
+        return _execute(spinner_msg, call)
+    try:
+        with spinner(spinner_msg):
+            return call()
+    except HydraDBClientError as e:
+        if not _refused_as_unified(e):
+            handle_api_error(e)
+    except httpx.RequestError as e:
+        handle_network_error(e)
+    err_console.print(f"  [dim]'{escape(database)}' is unified; redoing the request in the unified shape.[/dim]")
+    on_unified()
+    return UNIFIED_DONE
+
+
+#: Returned by :func:`_execute_or_unified` when the unified redo ran.
+UNIFIED_DONE = object()
 
 
 def _refuse_kind_on_unified(kind: str | None, database: str) -> None:
@@ -135,16 +211,22 @@ def _refuse_kind_on_unified(kind: str | None, database: str) -> None:
         )
 
 
-def _refuse_split_write_on_unified(wrapper: Any, database: str, layout: str | None, what: str) -> None:
+def _refuse_split_write_on_unified(wrapper: Any, database: str, layout: str | None, what: str) -> str:
     """The split ingest shapes (``memories``/``app_knowledge``/``documents``
     with ``type``) are refused by a unified database. Probed here unless the
-    caller already resolved the layout, so the deprecated aliases are covered."""
-    unified = layout == LAYOUT_UNIFIED if layout is not None else _is_unified(wrapper, database)
-    if unified:
-        print_error(
-            f"Database '{database}' is unified: {what}. "
-            "Use 'hydradb ingest --text ...' or 'hydradb ingest --conversation-file ...' (no --kind)."
-        )
+    caller already resolved the layout, so the deprecated aliases are covered.
+    Returns the layout (``split`` or ``unknown``) the write goes out under."""
+    resolved = layout if layout is not None else _layout(wrapper, database)
+    if resolved == LAYOUT_UNIFIED:
+        _refuse_split_write(database, what)
+    return resolved
+
+
+def _refuse_split_write(database: str, what: str) -> None:
+    print_error(
+        f"Database '{database}' is unified: {what}. "
+        "Use 'hydradb ingest --text ...' or 'hydradb ingest --conversation-file ...' (no --kind)."
+    )
 
 
 # ── query ────────────────────────────────────────────────────────────────────
@@ -445,7 +527,11 @@ def do_query(
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     spinner_msg: str = "Searching...",
+    kind_implied: bool = False,
 ) -> None:
+    """``kind_implied`` marks a kind the command picked (the deprecated
+    ``recall`` aliases), not one the user typed: a unified database has no
+    kinds, so it is dropped there instead of refused."""
     if not query.strip():
         print_error("Query cannot be empty.")
     if kind and kind not in VALID_KINDS:
@@ -477,8 +563,8 @@ def do_query(
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
 
-    if _is_unified(wrapper, tid):
-        _refuse_kind_on_unified(kind, tid)
+    def run_unified() -> None:
+        _refuse_kind_on_unified(None if kind_implied else kind, tid)
         outcome = _execute(
             spinner_msg,
             lambda: wrapper.context.query_unified(
@@ -500,17 +586,25 @@ def do_query(
         )
         body, request_id = outcome if isinstance(outcome, tuple) else (outcome, None)
         _print_unified_query(body if isinstance(body, dict) else {}, request_id, llm=llm)
+
+    layout = _layout(wrapper, tid)
+    if layout == LAYOUT_UNIFIED:
+        run_unified()
         return
 
-    if follow_forceful_relations is not None:
+    if follow_forceful_relations is not None and layout == LAYOUT_SPLIT:
         print_error(
             "--follow-forceful-relations/--no-follow-forceful-relations applies to unified databases only; "
             f"'{tid}' is a split database."
         )
-    if llm:
+    if llm and layout == LAYOUT_SPLIT:
         print_error(f"--llm applies to unified databases only; '{tid}' is a split database and has no llm_prompt.")
+    if layout == LAYOUT_UNKNOWN and (llm or follow_forceful_relations is not None):
+        # Only a unified database takes these, so the request goes out unified.
+        run_unified()
+        return
 
-    result = _execute(
+    result = _execute_or_unified(
         spinner_msg,
         lambda: wrapper.context.query(
             query=query,
@@ -528,7 +622,12 @@ def do_query(
             database=tid,
             collection=stid,
         ),
+        layout,
+        tid,
+        run_unified,
     )
+    if result is UNIFIED_DONE:
+        return
     print_result(result, _format_query_result)
 
 
@@ -640,13 +739,18 @@ def do_ingest_memory(
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     layout: str | None = None,
+    on_unified: Callable[[], None] | None = None,
 ) -> None:
+    """``on_unified`` redoes the write in the unified shape when the layout
+    was unknown and the database turned out to be unified; without one, the
+    refusal is explained instead."""
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
-    _refuse_split_write_on_unified(wrapper, tid, layout, "a memory (kind) cannot be written to it")
+    what = "a memory (kind) cannot be written to it"
+    layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
 
-    result = _execute(
+    result = _execute_or_unified(
         "Adding memory...",
         lambda: wrapper.context.ingest(
             kind="memory",
@@ -660,7 +764,12 @@ def do_ingest_memory(
             database=tid,
             collection=stid,
         ),
+        layout,
+        tid,
+        on_unified or (lambda: _refuse_split_write(tid, what)),
     )
+    if result is UNIFIED_DONE:
+        return
     print_result(result, lambda r: _format_ingest_memory(r, text))
 
 
@@ -672,13 +781,16 @@ def do_ingest_knowledge_text(
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     layout: str | None = None,
+    on_unified: Callable[[], None] | None = None,
 ) -> None:
+    """``on_unified``: see :func:`do_ingest_memory`."""
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
-    _refuse_split_write_on_unified(wrapper, tid, layout, "knowledge text (kind) cannot be written to it")
+    what = "knowledge text (kind) cannot be written to it"
+    layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
 
-    result = _execute(
+    result = _execute_or_unified(
         "Uploading text...",
         lambda: wrapper.context.ingest(
             kind="knowledge",
@@ -688,7 +800,12 @@ def do_ingest_knowledge_text(
             database=tid,
             collection=stid,
         ),
+        layout,
+        tid,
+        on_unified or (lambda: _refuse_split_write(tid, what)),
     )
+    if result is UNIFIED_DONE:
+        return
 
     def fmt(r: dict):
         preview = text[:80] + "..." if len(text) > 80 else text
@@ -747,11 +864,10 @@ def do_ingest_knowledge_files(
         tid = require_tenant_id(tenant_id)
         stid = resolve_sub_tenant_id(sub_tenant_id)
         wrapper = get_wrapper()
-        _refuse_split_write_on_unified(
-            wrapper, tid, layout, "files are not accepted (text or a conversation only). Extract the text first"
-        )
+        what = "files are not accepted (text or a conversation only). Extract the text first"
+        layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
 
-        result = _execute(
+        result = _execute_or_unified(
             f"Uploading {len(files)} file(s)...",
             lambda: wrapper.context.ingest_many(
                 kind="knowledge",
@@ -760,6 +876,9 @@ def do_ingest_knowledge_files(
                 database=tid,
                 collection=stid,
             ),
+            layout,
+            tid,
+            lambda: _refuse_split_write(tid, what),
         )
     finally:
         for fh in opened:
@@ -793,8 +912,8 @@ def do_ingest_knowledge_files(
 
 
 def _load_conversation(path: str) -> list[dict[str, Any]]:
-    """Read ``--conversation-file``: a JSON list of ``{role, content, name?}``
-    turns. Every turn is checked here so a bad one is named by index locally
+    """Read ``--conversation-file``: a JSON list of ``{role, content}``
+    turns (the speaker's name is the item's ``user_name``, from --user-name). Every turn is checked here so a bad one is named by index locally
     rather than as ``context[0]`` after a round trip."""
     p = Path(path)
     if not p.is_file():
@@ -802,9 +921,9 @@ def _load_conversation(path: str) -> list[dict[str, Any]]:
     try:
         turns = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        print_error(f"--conversation-file must be a JSON list of {{role, content, name?}} turns: {exc}")
+        print_error(f"--conversation-file must be a JSON list of {{role, content}} turns: {exc}")
     if not isinstance(turns, list) or not turns:
-        print_error("--conversation-file must be a non-empty JSON list of {role, content, name?} turns.")
+        print_error("--conversation-file must be a non-empty JSON list of {role, content} turns.")
     clean: list[dict[str, Any]] = []
     for i, turn in enumerate(turns):
         if not isinstance(turn, dict):
@@ -815,18 +934,17 @@ def _load_conversation(path: str) -> list[dict[str, Any]]:
         content = turn.get("content")
         if not isinstance(content, str) or not content.strip():
             print_error(f"conversation[{i}].content must be a non-empty string.")
-        unknown = sorted(set(turn) - {"role", "content", "name"})
+        if "name" in turn:
+            print_error(
+                f"conversation[{i}] has a name: a turn is only {{role, content}}. "
+                "Pass the user's name once with --user-name instead."
+            )
+        unknown = sorted(set(turn) - {"role", "content"})
         if unknown:
             print_error(
-                f"conversation[{i}] has unknown field(s): {', '.join(unknown)}. Only role, content and name are accepted."
+                f"conversation[{i}] has unknown field(s): {', '.join(unknown)}. Only role and content are accepted."
             )
-        item: dict[str, Any] = {"role": role, "content": content}
-        name = turn.get("name")
-        if name is not None:
-            if not isinstance(name, str) or not name.strip():
-                print_error(f"conversation[{i}].name must be a non-empty string when present.")
-            item["name"] = name
-        clean.append(item)
+        clean.append({"role": role, "content": content})
     return clean
 
 
@@ -848,6 +966,7 @@ def build_context_item(
     conversation: list[dict[str, Any]] | None = None,
     context_id: str | None = None,
     title: str | None = None,
+    user_name: str | None = None,
     enrich: bool = True,
     instructions: str | None = None,
     happened_at: str | None = None,
@@ -868,16 +987,32 @@ def build_context_item(
         print_error("Pass exactly one of --text or --conversation-file.")
     item: dict[str, Any] = {}
     if context_id:
+        if len(context_id) > UNIFIED_MAX_CONTEXT_ID_CHARS or "," in context_id:
+            print_error(f"--context-id must be at most {UNIFIED_MAX_CONTEXT_ID_CHARS} characters with no commas.")
         item["context_id"] = context_id
     if title:
+        if len(title.encode("utf-8")) > UNIFIED_MAX_TITLE_BYTES:
+            print_error(f"--title must be at most {UNIFIED_MAX_TITLE_BYTES} bytes.")
         item["title"] = title
     if text is not None:
         item["text"] = text
     else:
         item["conversation"] = conversation
+    body = text if text is not None else "".join(turn["content"] for turn in conversation or [])
+    if len(body.encode("utf-8")) > UNIFIED_MAX_TEXT_BYTES:
+        print_error(
+            f"The item is {len(body.encode('utf-8')):,} bytes of text; a unified database takes at most "
+            f"{UNIFIED_MAX_TEXT_BYTES:,} per item. Split it into several items."
+        )
+    if user_name is not None:
+        if not user_name.strip():
+            print_error("--user-name cannot be empty or whitespace-only.")
+        item["user_name"] = user_name
     item["enrich"] = bool(enrich)
     item["upsert"] = bool(upsert)
     if instructions:
+        if len(instructions) > UNIFIED_MAX_INSTRUCTIONS_CHARS:
+            print_error(f"--instructions must be at most {UNIFIED_MAX_INSTRUCTIONS_CHARS} characters.")
         item["instructions"] = instructions
     if happened_at:
         try:
@@ -903,7 +1038,7 @@ def build_context_item(
                 print_error("--forceful-relation cannot be empty or whitespace-only.")
             if candidate not in ids:
                 ids.append(candidate)
-        item["forceful_relations"] = {"ids": ids}
+        item["forceful_relations"] = {"context_ids": ids}
     if acl is not None:
         item["acl"] = list(acl)
     return item
@@ -924,8 +1059,8 @@ def _format_ingest_unified(r: dict, item: dict[str, Any]):
         f"[dim]{escape(preview)}[/dim]",
     ]
     for res in r.get("results", []) or []:
-        # The 202 still spells the item's context_id `source_id`.
-        cid = res.get("source_id") or res.get("context_id") or res.get("id") or "unknown"
+        # The 202 names the item's context_id `id`; older servers said `source_id`.
+        cid = res.get("id") or res.get("context_id") or res.get("source_id") or "unknown"
         lines.append(f"[cyan]Context ID:[/cyan] {escape(str(cid))} [dim]({res.get('status', 'unknown')})[/dim]")
         if res.get("error"):
             code = f" ({res['error_code']})" if res.get("error_code") else ""
@@ -940,6 +1075,7 @@ def do_ingest_unified(
     conversation_file: str | None = None,
     context_id: str | None = None,
     title: str | None = None,
+    user_name: str | None = None,
     enrich: bool = True,
     instructions: str | None = None,
     happened_at: str | None = None,
@@ -964,6 +1100,7 @@ def do_ingest_unified(
         conversation=conversation,
         context_id=context_id,
         title=title,
+        user_name=user_name,
         enrich=enrich,
         instructions=instructions,
         happened_at=happened_at,
@@ -1006,7 +1143,9 @@ def do_list(
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     spinner_msg: str = "Fetching sources...",
+    kind_implied: bool = False,
 ) -> None:
+    """``kind_implied``: see :func:`do_query`."""
     if kind and kind not in VALID_KINDS:
         print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
     if page is not None and page < 1:
@@ -1017,21 +1156,29 @@ def do_list(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
-    if _is_unified(wrapper, tid):
-        # One corpus: no kind is selected and none is sent.
-        _refuse_kind_on_unified(kind, tid)
+    layout = _layout(wrapper, tid)
 
-    result = _execute(
-        spinner_msg,
-        lambda: wrapper.context.list(
-            kind=kind,
-            page=page,
-            page_size=page_size,
-            acl=acl,
-            database=tid,
-            collection=stid,
-        ),
-    )
+    def listing(list_kind: str | None) -> Callable[[], Any]:
+        return lambda: wrapper.context.list(
+            kind=list_kind, page=page, page_size=page_size, acl=acl, database=tid, collection=stid
+        )
+
+    unified_result: list[Any] = []
+
+    def run_unified() -> None:
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(None if kind_implied else kind, tid)
+        unified_result.append(_execute(spinner_msg, listing(None)))
+
+    if layout == LAYOUT_UNIFIED:
+        run_unified()
+        result = unified_result[0]
+    else:
+        result = _execute_or_unified(spinner_msg, listing(kind), layout, tid, run_unified)
+        if result is UNIFIED_DONE:
+            result = unified_result[0]
+    # A unified database has one corpus, so a per-item kind would only mislead.
+    show_type = not unified_result
 
     def fmt(r: dict):
         items = r.get("sources") or r.get("user_memories") or []
@@ -1042,8 +1189,9 @@ def do_list(
             sid = item.get("id") or item.get("memory_id") or item.get("source_id") or "unknown"
             title = item.get("title") or item.get("memory_content") or item.get("content") or item.get("text") or ""
             title = title[:100] + "..." if len(title) > 100 else title
-            rows.append([str(i), sid, title, item.get("type", "")])
-        table = make_table("#", "ID", "Title", "Type", rows=rows, title=f"Found {len(items)} item(s)")
+            rows.append([str(i), sid, title, item.get("type", "")] if show_type else [str(i), sid, title])
+        columns = ("#", "ID", "Title", "Type") if show_type else ("#", "ID", "Title")
+        table = make_table(*columns, rows=rows, title=f"Found {len(items)} item(s)")
 
         parts: list[Any] = [table]
         footer_parts = []
@@ -1133,7 +1281,9 @@ def do_delete(
     kind: str | None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    kind_implied: bool = False,
 ) -> None:
+    """``kind_implied``: see :func:`do_query`."""
     clean_ids = [i.strip() for i in ids if i.strip()]
     if not clean_ids:
         print_error("IDs cannot be empty.")
@@ -1143,19 +1293,34 @@ def do_delete(
     tid = require_tenant_id(tenant_id)
     stid = resolve_sub_tenant_id(sub_tenant_id)
     wrapper = get_wrapper()
-    if _is_unified(wrapper, tid):
+    layout = _layout(wrapper, tid)
+    unified_result: list[Any] = []
+
+    def run_unified() -> None:
         # One corpus: no kind is selected and none is sent.
-        _refuse_kind_on_unified(kind, tid)
-        noun = "item(s)"
+        _refuse_kind_on_unified(None if kind_implied else kind, tid)
+        unified_result.append(
+            _execute(
+                "Deleting...", lambda: wrapper.context.delete(ids=clean_ids, kind=None, database=tid, collection=stid)
+            )
+        )
+
+    if layout == LAYOUT_UNIFIED:
+        run_unified()
+        result, noun = unified_result[0], "item(s)"
     else:
         # The split default, unchanged: a delete without --kind is a knowledge delete.
-        kind = kind or "knowledge"
-        noun = "memory" if kind == "memory" else "knowledge source(s)"
-
-    result = _execute(
-        "Deleting...",
-        lambda: wrapper.context.delete(ids=clean_ids, kind=kind, database=tid, collection=stid),
-    )
+        split_kind = kind or "knowledge"
+        noun = "memory" if split_kind == "memory" else "knowledge source(s)"
+        result = _execute_or_unified(
+            "Deleting...",
+            lambda: wrapper.context.delete(ids=clean_ids, kind=split_kind, database=tid, collection=stid),
+            layout,
+            tid,
+            run_unified,
+        )
+        if result is UNIFIED_DONE:
+            result, noun = unified_result[0], "item(s)"
 
     # v2 returns HTTP 200 with {success:false, deleted_count:0} when nothing
     # matched — that is a no-op, not a success. Surface it as an error (non-zero
@@ -1385,7 +1550,13 @@ def do_database_create(database: str, layout: str | None = None) -> None:
         "Creating database...",
         lambda: wrapper.databases.create(database=database, layout=layout),
     )
-    suffix = " (unified: one corpus, no --kind on later commands)" if layout == LAYOUT_UNIFIED else ""
+    if layout == LAYOUT_UNIFIED:
+        suffix = " (unified: one corpus, no --kind on later commands)"
+    elif layout == LAYOUT_SPLIT:
+        suffix = " (split: knowledge and memory, selected by --kind)"
+    else:
+        # No --type: the server picks, and current servers pick unified.
+        suffix = " (the server's default layout; 'hydradb database list' shows which)"
     print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.{suffix}")
 
 

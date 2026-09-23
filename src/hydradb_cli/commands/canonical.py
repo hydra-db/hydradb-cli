@@ -153,14 +153,16 @@ def ingest(
     source_id: str | None = typer.Option(
         None, "--source-id", help="Source identifier (--context-id on a unified database)."
     ),
-    user_name: str | None = typer.Option(None, "--user-name", help="User name (split memory only)."),
+    user_name: str | None = typer.Option(
+        None, "--user-name", help="Who is speaking: the user's name (split: memory only; unified: any item)."
+    ),
     infer: bool = typer.Option(True, "--infer/--no-infer", help="Extract insights and build knowledge graph."),
     markdown: bool = typer.Option(False, "--markdown", help="Treat text as markdown (split memory only)."),
     upsert: bool = typer.Option(True, "--upsert/--no-upsert", help="Update existing items with the same id."),
     conversation_file: str | None = typer.Option(
         None,
         "--conversation-file",
-        help="Unified databases: path to a JSON list of {role, content, name?} turns to ingest as one conversation (roles: user, assistant, system).",
+        help="Unified databases: path to a JSON list of {role, content} turns to ingest as one conversation (roles: user, assistant, system). Name the user with --user-name.",
     ),
     context_id: str | None = typer.Option(
         None,
@@ -210,7 +212,10 @@ def ingest(
     # database gets one JSON context item and never a kind; a split one keeps
     # every existing call exactly as it was.
     db, layout = _impl.database_layout(tid)
-    if layout == "unified":
+
+    def run_unified(resolved_text: str | None = None) -> None:
+        """The unified write. ``resolved_text`` is the text already read on the
+        split path (a redo); otherwise it is read here, after the checks."""
         if files:
             print_error(
                 f"Database '{db}' is unified: files are not accepted (text or a conversation only). "
@@ -218,21 +223,20 @@ def ingest(
             )
         if kind:
             print_error(f"Database '{db}' is unified: it has one corpus, so --kind does not apply. Omit it.")
-        if user_name:
-            print_error(
-                "--user-name does not apply on a unified database; name speakers per turn in --conversation-file."
-            )
         if markdown:
             print_error("--markdown does not apply on a unified database.")
         if conversation_file and text:
             print_error("Pass exactly one of --text or --conversation-file.")
         if context_id and source_id and context_id != source_id:
             print_error("--context-id and --source-id name the same thing on a unified database; pass one of them.")
+        if not conversation_file and resolved_text is None:
+            resolved_text = _resolve_text_input(text)
         _impl.do_ingest_unified(
-            text=None if conversation_file else _resolve_text_input(text),
+            text=None if conversation_file else resolved_text,
             conversation_file=conversation_file,
             context_id=context_id or source_id,
             title=title,
+            user_name=user_name,
             enrich=enrich and infer,
             instructions=instructions,
             happened_at=happened_at,
@@ -245,6 +249,9 @@ def ingest(
             tenant_id=tid,
             sub_tenant_id=stid,
         )
+
+    if layout == "unified":
+        run_unified()
         return
 
     unified_only = {
@@ -260,6 +267,11 @@ def ingest(
         "--acl": acl,
     }
     used = [flag for flag, value in unified_only.items() if value]
+    if used and layout == _impl.LAYOUT_UNKNOWN:
+        print_error(
+            f"{', '.join(used)} appl{'ies' if len(used) == 1 else 'y'} to unified databases only, and whether "
+            f"'{db}' is unified could not be checked just now. Try again."
+        )
     if used:
         print_error(f"{', '.join(used)} appl{'ies' if len(used) == 1 else 'y'} to unified databases only.")
     if files:
@@ -276,18 +288,20 @@ def ingest(
             print_error("--infer/--no-infer does not apply to file ingest; pass files only.")
         _impl.do_ingest_knowledge_files(files, upsert=upsert, tenant_id=tid, sub_tenant_id=stid, layout=layout)
         return
+    resolved = _resolve_text_input(text)
     if kind == "knowledge":
         _impl.do_ingest_knowledge_text(
-            _resolve_text_input(text),
+            resolved,
             title=title,
             source_id=source_id,
             tenant_id=tid,
             sub_tenant_id=stid,
             layout=layout,
+            on_unified=lambda: run_unified(resolved),
         )
         return
     _impl.do_ingest_memory(
-        _resolve_text_input(text),
+        resolved,
         title=title,
         source_id=source_id,
         user_name=user_name,
@@ -297,6 +311,7 @@ def ingest(
         tenant_id=tid,
         sub_tenant_id=stid,
         layout=layout,
+        on_unified=lambda: run_unified(resolved),
     )
 
 
@@ -487,7 +502,7 @@ def database_create(
     layout: str | None = typer.Option(
         None,
         "--type",
-        help="Storage layout: 'split' (default; separate knowledge and memory corpora selected by --kind) or 'unified' (one corpus; no --kind on later commands).",
+        help="Storage layout: 'split' (separate knowledge and memory corpora selected by --kind) or 'unified' (one corpus; no --kind on later commands). Omitted: the server's default, which is unified on current servers.",
     ),
 ) -> None:
     """Create a new database."""

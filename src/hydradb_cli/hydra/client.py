@@ -121,6 +121,11 @@ LAYOUT_UNIFIED = "unified"
 #: oversized batch is refused before it costs a round trip.
 UNIFIED_INGEST_MAX_ITEMS = 100
 
+#: The layout probe runs before every command, so it gets a short budget and
+#: no SDK retries: a slow or failing ``GET /databases`` must not hold up (or
+#: fail) a command that would otherwise succeed.
+LAYOUT_PROBE_TIMEOUT_S = 5
+
 
 class _Resource:
     """Base for the ``databases``/``context`` sub-resources."""
@@ -205,7 +210,12 @@ class _Databases(_Resource):
         """
         if self._w._layouts is not None:
             return self._w._layouts
-        listed = self.list()
+        listed = _unwrap(
+            self._invoke(
+                self._w._sdk.databases.list,
+                request_options={"timeout_in_seconds": LAYOUT_PROBE_TIMEOUT_S, "max_retries": 0},
+            )
+        )
         layouts: dict[str, str] = {}
         rows = listed.get("details") if isinstance(listed, dict) else None
         for row in rows or []:
@@ -510,7 +520,7 @@ class _Context(_Resource):
         given; ``enrich``/``upsert``/``instructions`` are the request-level
         defaults for them and travel only when set.
 
-        Returns the 202 payload: ``results[].source_id`` is the item's
+        Returns the 202 payload: ``results[].id`` is the item's
         ``context_id`` (server-minted when the item carried none).
         """
         if not items:
