@@ -186,19 +186,23 @@ def _pct(score: Any) -> str:
 
 
 def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
-    """One ``chunks[]`` item: context_id, score, content, enrichment text and
-    kind, temporal facts. Content is API data, so it is rendered as plain Text
-    and never parsed as markup."""
+    """One ``chunks[]`` item: context_id, score, content, enrichment and
+    enrichment_kind, temporal facts. ``enrichment`` is a plain string and
+    ``enrichment_kind`` its sibling (the declared context_category); either
+    can be absent, and a kind with no enrichment is still shown. Content is
+    API data, so it is rendered as plain Text and never parsed as markup."""
     score = _pct(chunk.get("score"))
     score_str = f" • {score}" if score else ""
     context_id = chunk.get("context_id") or ""
     id_str = f" • {escape(str(context_id))}" if context_id else ""
     body: list[Any] = [Text(_preview(chunk.get("content") or "", 300))]
     enrichment = chunk.get("enrichment")
-    if isinstance(enrichment, dict) and (enrichment.get("text") or enrichment.get("kind")):
-        kind = enrichment.get("kind")
-        head = f"enrichment ({kind}): " if kind else "enrichment: "
-        body.append(Text.assemble((head, "dim"), _preview(enrichment.get("text") or "", 300)))
+    enrichment = enrichment if isinstance(enrichment, str) else ""
+    kind = chunk.get("enrichment_kind")
+    kind = kind if isinstance(kind, str) else ""
+    if enrichment or kind:
+        head = f"enrichment ({kind})" if kind else "enrichment"
+        body.append(Text.assemble((f"{head}: " if enrichment else head, "dim"), _preview(enrichment, 300)))
     for fact in chunk.get("temporal") or []:
         if isinstance(fact, dict):
             span = " to ".join(str(x) for x in (fact.get("start_date"), fact.get("end_date")) if x)

@@ -29,7 +29,11 @@ from hydradb_cli.main import app
 
 runner = CliRunner()
 GOLDEN = Path(__file__).parent / "golden"
-UNIFIED_BODY = json.loads((GOLDEN / "query_unified.json").read_text())
+# A real unified /query envelope, rendered by the server's own handler test
+# (hydradb-application PRO-1618). Its ``meta.request_id`` is not used: each
+# test hands the CLI its own request_id through the wrapper or the envelope.
+UNIFIED_ENVELOPE = json.loads((GOLDEN / "query_unified.json").read_text())
+UNIFIED_BODY = UNIFIED_ENVELOPE["data"]
 SPLIT_BODY = json.loads((GOLDEN / "query.json").read_text())
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -453,30 +457,33 @@ class TestUnifiedQueryCommand:
         assert result.exit_code == 0, result.output
         out = _plain(result.output)
         assert "Found 2 result(s)" in out
-        # chunks[]: context_id, score, content, enrichment text and kind
-        assert "chat-2026-07-29#w2" in out and "87%" in out
-        assert "Keep answers short please" in out
-        assert "enrichment (user_preference): User prefers short, bullet-point answers." in out
-        assert "policy-1" in out and "61%" in out and "Refund policy: 30-day window." in out
-        assert "temporal: John lives in Austin" in out and "[2026-06-01 to 2026-07-01]" in out
+        # chunks[]: context_id, score, content, enrichment (a string) with
+        # enrichment_kind beside it, temporal facts
+        assert "refund-policy" in out and "91%" in out
+        assert "Refunds are processed within 30 days of purchase by the Finance Department." in out
+        assert "enrichment (business_knowledge): Refund window is 30 days; Finance owns refund processing." in out
+        assert "chat-2026-07-29" in out and "84%" in out and "Keep refund answers short please" in out
+        assert "enrichment (user_preference): User prefers short answers about refunds." in out
+        # a temporal fact with only a start date prints only that side
+        assert "temporal: Refund policy effective_from June 2026. Start: 2026-06-01 [2026-06-01]" in out
         # graph[]: grouped by origin, path_summary + triplets. A query-path hop
         # cites the returned chunk it came from; a chunk relation is listed
         # under the chunk it hangs under.
         assert "/// Graph: 1 query path(s)" in out
-        assert "John is on the Pro plan since June 2026." in out
-        assert "John -> subscribed to -> Pro plan [1]" in out
+        assert "Refund processing is managed by the Finance Department." in out
+        assert "Refund Processing -> managed by -> Finance Department [1]" in out
         assert "/// Graph: 1 chunk relation path(s)" in out
-        assert "[2] policy-1" in out
-        assert "The refund policy allows refunds within 30 days." in out
-        assert "Refund policy -> allows refunds within -> 30 days" in out
+        assert "[2] chat-2026-07-29" in out
+        assert "The user prefers short answers about refunds." in out
+        assert "User -> prefers -> short answers" in out
         assert out.index("/// Graph: 1 query path(s)") < out.index("/// Graph: 1 chunk relation path(s)")
         # forceful_relations[]: R label, via from/to and the pulled-in chunk
         assert "/// Forceful relations: 1 chunk(s)" in out
-        assert "R1" in out and "linear-PRO-1169" in out and "linear-PRO-1169-comment-4" in out
-        assert "shipped the fix" in out and "42%" in out
+        assert "R1" in out and "refund-faq" in out
+        assert "refunds to a card take 5 to 7 business days" in out and "0%" in out
         assert "Related" not in out
-        # the prompt is not dumped into the structured view
-        assert "=== CONTEXT ===" not in out
+        # the markdown prompt is not dumped into the structured view
+        assert "# Query results" not in out and "**Enrichment:**" not in out
         # feedback stays reachable
         assert "hydradb feedback req-1" in out
 
@@ -653,15 +660,15 @@ class TestQueryRenderer:
         # A server that does not list a database's layout still answers a
         # type-less query on a unified one in the unified shape, and the
         # renderer must still read it.
-        out = self._render(_impl._format_query_result({**UNIFIED_BODY, "request_id": "req-2"}))
-        assert "John -> subscribed to -> Pro plan" in out
+        out = self._render(_impl._format_query_result({**UNIFIED_BODY, "request_id": "req-2"}), width=200)
+        assert "Refund Processing -> managed by -> Finance Department" in out
         assert "enrichment (user_preference)" in out
         assert "req-2" in out
 
     def test_the_forceful_relations_section_is_hidden_when_empty(self):
         out = self._render(_impl._format_unified_query_result({**UNIFIED_BODY, "forceful_relations": []}))
         assert "Found 2 result(s)" in out and "/// Graph" in out
-        assert "Forceful relations" not in out and "linear-PRO-1169" not in out
+        assert "Forceful relations" not in out and "refund-faq" not in out
 
     def test_the_old_relations_key_is_not_read(self):
         # `relations` was renamed `forceful_relations`; there is no fallback.
@@ -669,7 +676,7 @@ class TestQueryRenderer:
         old["relations"] = UNIFIED_BODY["forceful_relations"]
         out = self._render(_impl._format_unified_query_result(old))
         assert "Found 2 result(s)" in out
-        assert "Forceful relations" not in out and "shipped the fix" not in out
+        assert "Forceful relations" not in out and "business days" not in out
         only_old = {"chunks": [], "graph": [], "relations": UNIFIED_BODY["forceful_relations"], "llm_prompt": ""}
         assert "No relevant results found." in self._render(_impl._format_unified_query_result(only_old))
 
@@ -677,9 +684,9 @@ class TestQueryRenderer:
         body = {
             **UNIFIED_BODY,
             "graph": [
-                _path("chunk_relation", "ck_c4", "Comment", "Fix", "The comment names the fix."),
+                _path("chunk_relation", "ck_faq_1", "Comment", "Fix", "The comment names the fix."),
                 _path("query_path", "ck_not_returned", "Alpha", "Beta", "Alpha links Beta."),
-                _path(None, "ck_9f2", "Gamma", "Delta", "Gamma links Delta."),
+                _path(None, "ck_policy_3", "Gamma", "Delta", "Gamma links Delta."),
             ],
         }
         out = _plain(self._render(_impl._format_unified_query_result(body), width=200))
@@ -692,21 +699,47 @@ class TestQueryRenderer:
         # a chunk relation hangs under the chunk its hops came from, here a
         # forceful-relation chunk, by its R label
         assert "/// Graph: 1 chunk relation path(s)" in out
-        assert re.search(r"P1\W+\[R1\] linear-PRO-1169-comment-4\W+The comment names the fix\.", out)
+        assert re.search(r"P1\W+\[R1\] refund-faq\W+The comment names the fix\.", out)
         # a path with no origin is still shown, in its own group, not guessed into one
         assert "/// Graph: 1 path(s) with no known origin" in out
         assert re.search(r"P3\W+Gamma links Delta\.", out) and "Gamma -> links -> Delta [1]" in out
         assert out.index("query path(s)") < out.index("chunk relation path(s)") < out.index("no known origin")
 
-    def test_enrichment_with_only_a_kind_still_shows_the_kind(self):
+    def test_enrichment_is_a_string_with_its_kind_beside_it(self):
+        chunk = {"context_id": "c1", "score": 0.5, "content": "x"}
+        cases = (
+            # enrichment_kind is present even when there is no enrichment
+            ({"enrichment_kind": "decision_trace"}, "enrichment (decision_trace)", "enrichment (decision_trace):"),
+            ({"enrichment": "Owns refunds."}, "enrichment: Owns refunds.", "enrichment ("),
+            (
+                {"enrichment": "Owns refunds.", "enrichment_kind": "business_knowledge"},
+                "enrichment (business_knowledge): Owns refunds.",
+                None,
+            ),
+        )
+        for fields, present, absent in cases:
+            body = {**EMPTY_BODY, "chunks": [{**chunk, **fields}]}
+            out = self._render(_impl._format_unified_query_result(body))
+            assert present in out, fields
+            if absent:
+                assert absent not in out, fields
+
+    def test_no_enrichment_line_without_enrichment_or_kind(self):
+        body = {**EMPTY_BODY, "chunks": [{"context_id": "c1", "score": 0.5, "content": "x"}]}
+        assert "enrichment" not in self._render(_impl._format_unified_query_result(body))
+
+    def test_the_old_enrichment_object_is_not_read(self):
+        # `enrichment` was `{text, kind}`; it is a string now, with the kind in
+        # `enrichment_kind`. An object is not rendered, and does not crash.
         body = {
             **EMPTY_BODY,
             "chunks": [
-                {"context_id": "c1", "score": 0.5, "content": "x", "enrichment": {"text": "", "kind": "decision_trace"}}
+                {"context_id": "c1", "content": "x", "enrichment": {"text": "stale text", "kind": "decision_trace"}}
             ],
         }
         out = self._render(_impl._format_unified_query_result(body))
-        assert "enrichment (decision_trace)" in out
+        assert "Found 1 result(s)" in out
+        assert "enrichment" not in out and "stale text" not in out
 
 
 # ── hydradb ingest ───────────────────────────────────────────────────────────
