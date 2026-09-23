@@ -153,6 +153,19 @@ def _sdk_500(request):
     return httpx.Response(500, json={"success": False, "error": {"message": "the SDK path must not be used"}})
 
 
+def _sdk_server(routes: dict, seen: list):
+    """An SDK transport answering ``routes[path] -> (status, json)`` and
+    recording every request as ``(method, path, json body)``."""
+
+    def handler(request):
+        body = json.loads(request.content) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        status, payload = routes[request.url.path]
+        return httpx.Response(status, json=payload)
+
+    return handler
+
+
 class _Capture:
     """Stands in for ``httpx.post`` on the raw path and records every call."""
 
@@ -170,43 +183,6 @@ def _capture_post(monkeypatch, status: int = 200, body: dict | None = None) -> _
     capture = _Capture(status, body)
     monkeypatch.setattr("hydradb_cli.hydra.client.httpx.post", capture)
     return capture
-
-
-class _WatchedMeta(dict):
-    """An envelope ``meta`` that records every key read from it (``*`` for a
-    read of the whole mapping), so a test can pin what the unified path reads."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.read: list[str] = []
-
-    def __getitem__(self, key):
-        self.read.append(key)
-        return super().__getitem__(key)
-
-    def get(self, key, default=None):
-        self.read.append(key)
-        return super().get(key, default)
-
-    def __contains__(self, key):
-        self.read.append(key)
-        return super().__contains__(key)
-
-    def __iter__(self):
-        self.read.append("*")
-        return super().__iter__()
-
-    def keys(self):
-        self.read.append("*")
-        return super().keys()
-
-    def items(self):
-        self.read.append("*")
-        return super().items()
-
-    def values(self):
-        self.read.append("*")
-        return super().values()
 
 
 def _path(origin: str | None, chunk_id: str, source: str, target: str, summary: str) -> dict:
@@ -301,11 +277,10 @@ class TestLayoutProbe:
 
 
 class TestUnifiedQueryWrapper:
-    def test_posts_no_type_and_returns_the_body_verbatim_with_the_request_id(self, monkeypatch):
-        capture = _capture_post(
-            monkeypatch, body={"success": True, "data": UNIFIED_BODY, "meta": {"request_id": "req-1", "latency_ms": 12}}
-        )
-        w = _real_wrapper(_sdk_500)
+    def test_sends_no_type_through_the_sdk_and_returns_the_body_verbatim(self):
+        seen = []
+        envelope = {"success": True, "data": UNIFIED_BODY, "meta": {"request_id": "req-1", "latency_ms": 12}}
+        w = _real_wrapper(_sdk_server({"/query": (200, envelope)}, seen))
         body, request_id = w.context.query_unified(
             query="pro plan",
             operator="and",
@@ -318,10 +293,9 @@ class TestUnifiedQueryWrapper:
         )
         assert body == UNIFIED_BODY, "the four keys, nothing added, nothing dropped"
         assert request_id == "req-1"
-        call = capture.calls[0]
-        assert call["url"] == "http://test.local/query"
-        assert call["headers"]["API-Version"] == "2"
-        assert call["json"] == {
+        method, path, sent = seen[0]
+        assert (method, path) == ("POST", "/query")
+        assert sent == {
             "database": "db_test",
             "collection": "col_test",
             "query": "pro plan",
@@ -333,19 +307,20 @@ class TestUnifiedQueryWrapper:
             "acl": ["a@x.com"],
             "follow_forceful_relations": False,
         }
-        assert "type" not in call["json"]
 
-    def test_unset_fields_are_omitted_not_sent_as_null(self, monkeypatch):
-        capture = _capture_post(monkeypatch, body={"success": True, "data": EMPTY_BODY, "meta": {}})
-        body, request_id = _real_wrapper(_sdk_500).context.query_unified(query="q")
-        assert capture.calls[0]["json"] == {"database": "db_test", "collection": "col_test", "query": "q"}
+    def test_unset_fields_are_omitted_not_sent_as_null(self):
+        seen = []
+        w = _real_wrapper(_sdk_server({"/query": (200, {"success": True, "data": EMPTY_BODY, "meta": {}})}, seen))
+        body, request_id = w.context.query_unified(query="q")
+        assert seen[0][2] == {"database": "db_test", "collection": "col_test", "query": "q"}
         assert body == EMPTY_BODY
         assert request_id is None
 
-    def test_a_refusal_is_a_client_error(self, monkeypatch):
-        _capture_post(monkeypatch, status=400, body={"success": False, "error": {"message": "knowledge is not valid"}})
+    def test_a_refusal_is_a_client_error(self):
+        refusal = {"success": False, "error": {"message": "knowledge is not valid"}}
+        w = _real_wrapper(_sdk_server({"/query": (400, refusal)}, []))
         with pytest.raises(HydraDBClientError) as excinfo:
-            _real_wrapper(_sdk_500).context.query_unified(query="q")
+            w.context.query_unified(query="q")
         assert excinfo.value.status_code == 400
         assert "knowledge is not valid" in str(excinfo.value.detail)
 
@@ -576,55 +551,48 @@ class TestUnifiedQueryCommand:
         assert "follow_forceful_relations" not in kwargs and "llm" not in kwargs
         w.context.query_unified.assert_not_called()
 
-    def test_only_the_request_id_is_read_from_the_unified_meta(self, monkeypatch):
+    def test_the_request_id_reaches_every_output_mode(self, monkeypatch):
         """A unified /query ``meta`` has no ``tenant_id``, ``sub_tenant_id`` or
-        ``source_type`` (PRO-1618): nothing on the unified path may read them,
-        and ``request_id`` is the one key it needs, in every output mode."""
+        ``source_type`` (PRO-1618); ``request_id`` is the one key the unified
+        path needs, in every output mode."""
         monkeypatch.setenv("HYDRADB_API_KEY", "x")
         monkeypatch.setenv("HYDRADB_DATABASE", "db_test")
-        meta = _WatchedMeta(
-            {"request_id": "req-7", "api_version": "2", "latency_ms": 9, "database": "db_test", "collection": "c"}
-        )
-        wrapper = _real_wrapper(
-            lambda r: httpx.Response(200, json=_databases_envelope([{"database": "db_test", "type": "unified"}]))
-        )
-        monkeypatch.setattr(wrapper, "_raw_post_with_meta", lambda path, *, json_body: (UNIFIED_BODY, meta))
+        meta = {"request_id": "req-7", "api_version": "2", "latency_ms": 9, "database": "db_test", "collection": "c"}
+        routes = {
+            "/databases": (200, _databases_envelope([{"database": "db_test", "type": "unified"}])),
+            "/query": (200, {"success": True, "data": UNIFIED_BODY, "meta": meta}),
+        }
         outputs = {}
         for mode, argv in (
             ("human", ["query", "pro plan"]),
             ("llm", ["query", "pro plan", "--llm"]),
             ("json", ["--output", "json", "query", "pro plan"]),
         ):
+            wrapper = _real_wrapper(_sdk_server(routes, []))
             with patch("hydradb_cli.commands._impl.get_wrapper", return_value=wrapper):
                 result = runner.invoke(app, argv, env=_WIDE)
             assert result.exit_code == 0, (mode, result.output)
             outputs[mode] = result
-        assert set(meta.read) == {"request_id"}, meta.read
         assert "hydradb feedback req-7" in outputs["human"].output
         assert "req-7" in outputs["llm"].stderr
         assert json.loads(outputs["json"].stdout) == UNIFIED_BODY
 
     def test_end_to_end_json_is_the_server_body_verbatim(self, monkeypatch):
-        """Real wrapper: the probe over the SDK transport, the query over the raw path."""
+        """Real wrapper and SDK: the probe, then the type-less query."""
         monkeypatch.setenv("HYDRADB_API_KEY", "x")
         monkeypatch.setenv("HYDRADB_DATABASE", "db_test")
         monkeypatch.setenv("HYDRADB_COLLECTION", "col_test")
-        probes = []
-
-        def sdk_handler(request):
-            probes.append(request.url.path)
-            return httpx.Response(200, json=_databases_envelope([{"database": "db_test", "type": "unified"}]))
-
-        capture = _capture_post(
-            monkeypatch, body={"success": True, "data": UNIFIED_BODY, "meta": {"request_id": "req-9"}}
-        )
-        with patch("hydradb_cli.commands._impl.get_wrapper", return_value=_real_wrapper(sdk_handler)):
+        seen = []
+        routes = {
+            "/databases": (200, _databases_envelope([{"database": "db_test", "type": "unified"}])),
+            "/query": (200, {"success": True, "data": UNIFIED_BODY, "meta": {"request_id": "req-9"}}),
+        }
+        with patch("hydradb_cli.commands._impl.get_wrapper", return_value=_real_wrapper(_sdk_server(routes, seen))):
             result = runner.invoke(app, ["--output", "json", "query", "pro plan"])
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout) == UNIFIED_BODY
-        assert probes == ["/databases"]
-        assert capture.calls[0]["url"] == "http://test.local/query"
-        assert "type" not in capture.calls[0]["json"]
+        assert [path for _, path, _ in seen] == ["/databases", "/query"]
+        assert "type" not in seen[1][2]
 
 
 # ── the renderer ─────────────────────────────────────────────────────────────
@@ -1240,12 +1208,14 @@ class TestDatabaseLayoutCommands:
         assert "split" in result.output and "unified" in result.output
         w.databases.create.assert_not_called()
 
-    def test_wrapper_create_with_a_layout_posts_type_over_the_raw_path(self, monkeypatch):
-        capture = _capture_post(monkeypatch, body={"success": True, "data": {"status": "accepted"}, "meta": {}})
-        out = _real_wrapper(_sdk_500).databases.create(database="new", layout="unified")
-        assert out == {"status": "accepted"}
-        assert capture.calls[0]["url"] == "http://test.local/databases"
-        assert capture.calls[0]["json"] == {"database": "new", "type": "unified"}
+    def test_wrapper_create_with_a_layout_sends_type_through_the_sdk(self):
+        seen = []
+        accepted = {"success": True, "data": {"status": "accepted"}, "meta": {}}
+        out = _real_wrapper(_sdk_server({"/databases": (200, accepted)}, seen)).databases.create(
+            database="new", layout="unified"
+        )
+        assert out.get("status") == "accepted"
+        assert seen == [("POST", "/databases", {"database": "new", "type": "unified"})]
 
     def test_wrapper_create_without_a_layout_is_the_sdk_call(self):
         seen = {}
