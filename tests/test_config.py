@@ -1,6 +1,7 @@
 """Tests for hydradb_cli.config module."""
 
 import json
+import sys
 
 import pytest
 
@@ -77,6 +78,7 @@ class TestSaveAndReadConfig:
         assert get_api_key() == "key1"
         assert get_tenant_id() == "t1"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
     def test_config_file_permissions(self, clean_config):
         save_config(api_key="secret")
         assert oct(clean_config.stat().st_mode)[-3:] == "600"

@@ -29,7 +29,9 @@ def _resolve_text_input(text: str | None) -> str:
             typer.echo("Reading from stdin (Ctrl+D to finish)...", err=True)
             text = sys.stdin.read().strip()
         else:
-            text = read_stdin_safe()
+            # Explicit `-`: the user asked for stdin, so block until EOF rather than
+            # giving up after a short poll (a slow upstream producer would be dropped).
+            text = sys.stdin.read().strip()
         if not text:
             print_error("No input received from stdin.")
     if text is None:

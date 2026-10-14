@@ -238,10 +238,14 @@ def load(
 
     if not file.exists():
         print_error(f"File not found: {file}")
+    if not file.is_file():
+        print_error(f"Not a regular file: {file}")
     try:
-        rows = json.loads(file.read_text())
+        rows = json.loads(file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         print_error(f"{file} is not valid JSON: {e}")
+    except (UnicodeDecodeError, OSError) as e:
+        print_error(f"Could not read {file} as UTF-8 text: {e}")
     if not isinstance(rows, list):
         print_error(f"{file} must contain a JSON array of row objects.")
     if not rows:
