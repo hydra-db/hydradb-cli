@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-REPO="${HYDRADB_CLI_REPO:-usecortex/hydradb-cli}"
+REPO="${HYDRADB_CLI_REPO:-hydra-db/hydradb-cli}"
 PACKAGE_NAME="${HYDRADB_CLI_PACKAGE:-hydradb-cli}"
 COMMAND_NAME="${HYDRADB_CLI_COMMAND:-hydradb}"
 VERSION="${HYDRADB_CLI_VERSION:-}"
