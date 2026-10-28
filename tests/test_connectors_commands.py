@@ -512,5 +512,5 @@ def test_provider_acl_details():
 def test_acl_help_explains_connector_enforcement(command):
     result = runner.invoke(app, [command, "--help"], env=_WIDE)
     assert result.exit_code == 0
-    assert "acl_ignored_by_connector_enforcement" in result.output
     assert "authenticated caller" in result.output
+    assert "ignore supplied ACL" in result.output
