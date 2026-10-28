@@ -498,19 +498,6 @@ def test_no_credential_schema_error_does_not_name_a_flag_that_exists_nowhere():
     assert "--credentials-stdin" in text
 
 
-@pytest.mark.parametrize("flag,value", [(None, None), ("--enforce-acl", True), ("--no-enforce-acl", False)])
-def test_create_acl_option(flag, value):
-    _auth()
-    w = _wrapper()
-    args = ["connectors", "create", "--provider", "slack", "--credentials-stdin"]
-    if flag:
-        args.append(flag)
-    with _patch(w):
-        result = runner.invoke(app, args, input='{"access_token":"test"}', env=_WIDE)
-    assert result.exit_code == 0, result.output
-    assert w.connectors.create.call_args.kwargs["enforce_acl"] is value
-
-
 def test_provider_acl_details():
     _auth()
     w = _wrapper(provider={**SLACK_SCHEMA, "acl_supported": True, "acl_description": "Uses identities"})

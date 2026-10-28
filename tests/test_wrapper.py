@@ -733,23 +733,6 @@ class TestAclEnforcementSync:
         assert result["request_id"] == "rid"
         assert result["warnings"][0]["code"] == "acl_ignored_by_connector_enforcement"
 
-    @pytest.mark.parametrize("value", [None, True, False])
-    def test_create_enforce_acl_wire(self, value, monkeypatch):
-        captured = {}
-        w = _wrapper_with_response({"connector_id": "c1"}, captured=captured)
-
-        def post(url, **kwargs):
-            captured["body"] = kwargs["json"]
-            return httpx.Response(200, json={"connector_id": "c1"})
-
-        monkeypatch.setattr(httpx, "post", post)
-        w.connectors.create(provider="slack", credentials={"token": "x"}, enforce_acl=value)
-        body = captured.get("body") if value is not None else json.loads(captured["request"].content)
-        if value is None:
-            assert "enforce_acl" not in body
-        else:
-            assert body["enforce_acl"] is value
-
     def test_raw_envelope_preserves_warnings_and_request_id(self, monkeypatch, capsys):
         warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
         w = HydraDB(token="x", base_url="http://test.local", database="db_test")

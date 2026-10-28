@@ -875,27 +875,7 @@ class _Connectors(_Resource):
         credentials: dict | None = None,
         auth_type: str | None = None,
         sync_interval_seconds: int | None = None,
-        enforce_acl: bool | None = None,
     ) -> dict:
-        # SDK 2.1.7 cannot serialize enforce_acl. Use the equivalent v2 JSON
-        # transport only when explicitly set until a released SDK adds it.
-        if enforce_acl is not None:
-            body = {
-                k: v
-                for k, v in {
-                    "provider": provider,
-                    "name": name,
-                    "database": self._w._require_database(database),
-                    "collection": self._w._resolve_collection(collection),
-                    "provider_account_scope": provider_account_scope,
-                    "credentials": credentials,
-                    "auth_type": auth_type,
-                    "sync_interval_seconds": sync_interval_seconds,
-                    "enforce_acl": enforce_acl,
-                }.items()
-                if v is not None
-            }
-            return self._w._raw_post("/connectors", json_body=body)
         resp = self._invoke(
             self._w._sdk.connectors.create,
             provider=provider,

@@ -456,11 +456,6 @@ def create(
     sync_interval: int | None = typer.Option(None, "--sync-interval", help="Seconds between automatic syncs."),
     database: str | None = typer.Option(None, "--database", "-d", help="Target database. Uses the default if unset."),
     collection: str | None = typer.Option(None, "--collection", help="Target collection."),
-    enforce_acl: bool | None = typer.Option(
-        None,
-        "--enforce-acl/--no-enforce-acl",
-        help="Enable or disable connector ACL enforcement; omit for the server default.",
-    ),
 ) -> None:
     """Create a connector.
 
@@ -495,7 +490,6 @@ def create(
             provider_account_scope=scope,
             credentials=credentials,
             sync_interval_seconds=sync_interval,
-            enforce_acl=enforce_acl,
         ),
     )
 
