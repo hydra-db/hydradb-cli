@@ -779,3 +779,35 @@ class TestAclEnforcementSync:
         )
         assert result == {"warnings": ["payload warning"], "response_warnings": [warning]}
         assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err
+
+    def test_existing_response_warning_field_is_not_replaced(self):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload"], "response_warnings": ["keep-me"]},
+                "meta": {"warnings": [warning]},
+            }
+        )
+        assert result == {
+            "warnings": ["payload"],
+            "response_warnings": ["keep-me", warning],
+        }
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"inner": {"sources": [], "warnings": ["payload"]}},
+            {"inner": {"sources": []}, "warnings": ["payload"]},
+        ],
+    )
+    def test_list_flattening_preserves_payload_and_envelope_warnings(self, payload):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = _wrapper_with_response({"success": True, "data": payload, "meta": {"warnings": [warning]}})
+        assert w.context.list() == {
+            "sources": [],
+            "warnings": ["payload"],
+            "response_warnings": [warning],
+        }

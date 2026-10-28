@@ -53,6 +53,18 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
+def _merge_warning_field(target: dict[str, Any], key: str, value: Any) -> None:
+    """Copy a payload warning field without replacing an existing value."""
+    if key not in target:
+        target[key] = value
+        return
+    collision_key = "response_warnings"
+    existing = target.get(collision_key, [])
+    existing_items = existing if isinstance(existing, list) else [existing]
+    value_items = value if isinstance(value, list) else [value]
+    target[collision_key] = [*existing_items, *value_items]
+
+
 def _with_warnings(data: Any, meta: Any) -> Any:
     """Keep envelope warnings without replacing the response payload shape.
 
@@ -81,8 +93,9 @@ def _with_warnings(data: Any, meta: Any) -> Any:
     for warning in warnings:
         err_console.print("warning: " + json.dumps(_dump(warning), ensure_ascii=False), markup=False)
     if isinstance(data, dict):
-        key = "response_warnings" if "warnings" in data else "warnings"
-        return {**data, key: warnings}
+        result = dict(data)
+        _merge_warning_field(result, "warnings", warnings)
+        return result
     return data
 
 
@@ -463,9 +476,11 @@ class _Context(_Resource):
         if isinstance(data, dict):
             inner = data.get("inner")
             if isinstance(inner, dict):
-                if "warnings" in data and "warnings" not in inner:
-                    inner["warnings"] = data["warnings"]
-                return inner
+                flattened = dict(inner)
+                for key in ("warnings", "response_warnings"):
+                    if key in data:
+                        _merge_warning_field(flattened, key, data[key])
+                return flattened
             if "inner" in data:
                 return {k: v for k, v in data.items() if k != "inner"}
         return data
