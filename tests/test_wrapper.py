@@ -715,3 +715,99 @@ class TestQueryRequestId:
             }
         )
         assert w.context.query(query="hello")["request_id"] == "from-data"
+
+
+class TestAclEnforcementSync:
+    def test_query_preserves_warning_and_request_id(self):
+        w = _wrapper_with_response(
+            {
+                "success": True,
+                "data": {"chunks": []},
+                "meta": {
+                    "request_id": "rid",
+                    "warnings": [{"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}],
+                },
+            }
+        )
+        result = w.context.query(query="hello", acl=["someone"])
+        assert result["request_id"] == "rid"
+        assert result["warnings"][0]["code"] == "acl_ignored_by_connector_enforcement"
+
+    def test_raw_envelope_preserves_warnings_and_request_id(self, monkeypatch, capsys):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = HydraDB(token="x", base_url="http://test.local", database="db_test")
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda *a, **kw: httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"sources": []},
+                    "meta": {"request_id": "raw-id", "warnings": [warning]},
+                },
+            ),
+        )
+        result = w.context.subgraph(id="source")
+        assert result == {"sources": [], "request_id": "raw-id", "warnings": [warning]}
+        assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err
+
+    def test_list_preserves_warning_when_flattening(self):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = _wrapper_with_response(
+            {"success": True, "data": {"inner": {"sources": []}}, "meta": {"warnings": [warning]}}
+        )
+        assert w.context.list()["warnings"] == [warning]
+
+    def test_list_payload_keeps_shape_and_warning_is_visible(self, capsys):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        result = _unwrap_payload({"success": True, "data": [1, 2], "meta": {"warnings": [{"code": "warning-code"}]}})
+        assert result == [1, 2]
+        assert "warning-code" in capsys.readouterr().err
+
+    def test_payload_warning_collision_preserves_envelope_warnings(self, capsys):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload warning"]},
+                "meta": {"warnings": [None, {"message": "missing-code"}, warning]},
+            }
+        )
+        assert result == {"warnings": ["payload warning"], "response_warnings": [warning]}
+        assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err
+
+    def test_existing_response_warning_field_is_not_replaced(self):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload"], "response_warnings": ["keep-me"]},
+                "meta": {"warnings": [warning]},
+            }
+        )
+        assert result == {
+            "warnings": ["payload"],
+            "response_warnings": ["keep-me", warning],
+        }
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"inner": {"sources": [], "warnings": ["payload"]}},
+            {"inner": {"sources": []}, "warnings": ["payload"]},
+        ],
+    )
+    def test_list_flattening_preserves_payload_and_envelope_warnings(self, payload):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = _wrapper_with_response({"success": True, "data": payload, "meta": {"warnings": [warning]}})
+        assert w.context.list() == {
+            "sources": [],
+            "warnings": ["payload"],
+            "response_warnings": [warning],
+        }

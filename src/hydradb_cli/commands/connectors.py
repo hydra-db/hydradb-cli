@@ -307,6 +307,8 @@ def _print_provider_detail(provider_id: str, detail: dict) -> None:
                 ("provider", detail.get("provider", provider_id)),
                 ("indexed objects", ", ".join(detail.get("indexed_object_types") or []) or "—"),
                 ("credentials", ", ".join(name for name, _ in fields) or "—"),
+                ("acl_supported", str(detail.get("acl_supported", "—"))),
+                ("acl_description", str(detail.get("acl_description") or "—")),
             ],
             title=f"Provider: {provider_id}",
         )

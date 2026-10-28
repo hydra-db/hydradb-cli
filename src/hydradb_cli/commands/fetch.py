@@ -6,19 +6,22 @@ Each command warns once and delegates to the canonical implementation.
 import typer
 
 from hydradb_cli.commands import _impl
+from hydradb_cli.commands._acl import ACL_HELP, ACL_WARNING_EPILOG
 from hydradb_cli.output import warn_deprecated
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Inspect stored data — use 'hydradb inspect/list/relations'.")
 
 
-@app.command()
+@app.command(epilog=ACL_WARNING_EPILOG)
 def content(
     source_id: str = typer.Argument(help="Source ID to fetch content for."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
     mode: str = typer.Option("content", "--mode", help="Fetch mode: 'content', 'url', or 'both'."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help=ACL_HELP,
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Fetch source content — use 'hydradb inspect'."""
@@ -28,7 +31,7 @@ def content(
     )
 
 
-@app.command()
+@app.command(epilog=ACL_WARNING_EPILOG)
 def sources(
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
@@ -36,7 +39,9 @@ def sources(
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help=ACL_HELP,
     ),
 ) -> None:
     """[dim](deprecated)[/dim] List ingested sources — use 'hydradb list'."""
@@ -54,7 +59,7 @@ def sources(
     )
 
 
-@app.command()
+@app.command(epilog=ACL_WARNING_EPILOG)
 def relations(
     source_id: str = typer.Argument(help="Source ID to fetch graph relations for."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
@@ -64,7 +69,9 @@ def relations(
     ),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help=ACL_HELP,
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Fetch graph relations — use 'hydradb relations'."""

@@ -15,6 +15,7 @@ import typer
 from rich.panel import Panel
 
 from hydradb_cli.commands import _impl
+from hydradb_cli.commands._acl import ACL_HELP
 from hydradb_cli.config import get_full_config
 from hydradb_cli.output import console, make_kv_table, print_error, print_json, spinner
 from hydradb_cli.utils.common import mask_api_key, read_stdin_safe, resolve_scope_flags
@@ -65,7 +66,7 @@ def query(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -187,7 +188,7 @@ def list_items(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -207,7 +208,7 @@ def inspect(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -245,7 +246,7 @@ def relations(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -267,7 +268,7 @@ def subgraph(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). The subgraph contains only items those principals may see. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),

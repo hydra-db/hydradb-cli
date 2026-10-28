@@ -53,6 +53,52 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
+def _merge_warning_field(target: dict[str, Any], key: str, value: Any) -> None:
+    """Copy a payload warning field without replacing an existing value."""
+    if key not in target:
+        target[key] = value
+        return
+    collision_key = "response_warnings"
+    existing = target.get(collision_key, [])
+    existing_items = existing if isinstance(existing, list) else [existing]
+    value_items = value if isinstance(value, list) else [value]
+    target[collision_key] = [*existing_items, *value_items]
+
+
+def _with_warnings(data: Any, meta: Any) -> Any:
+    """Keep envelope warnings without replacing the response payload shape.
+
+    SDK 2.1.7 has no generated warnings field, but retains unknown metadata
+    as pydantic extras. Raw endpoints supply the same metadata as dictionaries.
+    """
+    from hydradb_cli.output import err_console
+
+    meta = _dump(meta)
+    raw_warnings = meta.get("warnings") if isinstance(meta, dict) else None
+    if not isinstance(raw_warnings, list):
+        return data
+    warnings = []
+    for warning in raw_warnings:
+        warning = _dump(warning)
+        if (
+            isinstance(warning, dict)
+            and isinstance(warning.get("code"), str)
+            and warning["code"]
+            and (warning.get("message") is None or isinstance(warning["message"], str))
+        ):
+            warnings.append(warning)
+    if not warnings:
+        return data
+    # stderr also covers list payloads and human formatters which omit metadata.
+    for warning in warnings:
+        err_console.print("warning: " + json.dumps(_dump(warning), ensure_ascii=False), markup=False)
+    if isinstance(data, dict):
+        result = dict(data)
+        _merge_warning_field(result, "warnings", warnings)
+        return result
+    return data
+
+
 def _unwrap(obj: Any) -> Any:
     """Return the plain-dict payload for an SDK response.
 
@@ -61,7 +107,7 @@ def _unwrap(obj: Any) -> Any:
     """
     if _is_envelope(obj):
         data = _dump(obj.data)
-        return data if data is not None else {}
+        return _with_warnings(data if data is not None else {}, obj.meta)
     dumped = _dump(obj)
     return dumped if dumped is not None else {}
 
@@ -80,7 +126,11 @@ def _unwrap_payload(body: Any) -> Any:
     """
     if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
         data = body["data"]
-        return data if data is not None else {}
+        result = _with_warnings(data if data is not None else {}, body.get("meta"))
+        rid = _request_id_of(body)
+        if rid and isinstance(result, dict) and "request_id" not in result:
+            result["request_id"] = rid
+        return result
     return body if body is not None else {}
 
 
@@ -426,7 +476,11 @@ class _Context(_Resource):
         if isinstance(data, dict):
             inner = data.get("inner")
             if isinstance(inner, dict):
-                return inner
+                flattened = dict(inner)
+                for key in ("warnings", "response_warnings"):
+                    if key in data:
+                        _merge_warning_field(flattened, key, data[key])
+                return flattened
             if "inner" in data:
                 return {k: v for k, v in data.items() if k != "inner"}
         return data
@@ -1020,10 +1074,7 @@ class HydraDB:
 
         # Unwrap by SHAPE, never by assumption: the connector endpoints mostly
         # return bare objects rather than a HandlerEnvelope.
-        if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
-            data = body["data"]
-            return data if data is not None else {}
-        return body if body is not None else {}
+        return _unwrap_payload(body)
 
     def _raw_post(self, path: str, *, json_body: Any) -> Any:
         """POST an endpoint the SDK cannot express, with the same error contract.
