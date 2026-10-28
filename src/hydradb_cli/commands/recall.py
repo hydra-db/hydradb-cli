@@ -8,12 +8,13 @@ the documented ``-o json`` contract do not break. New code should use
 import typer
 
 from hydradb_cli.commands import _impl
+from hydradb_cli.commands._acl import ACL_HELP, ACL_WARNING_EPILOG
 from hydradb_cli.output import warn_deprecated
 
 app = typer.Typer(help="[dim](deprecated)[/dim] Recall context — use 'hydradb query'.")
 
 
-@app.command("full")
+@app.command("full", epilog=ACL_WARNING_EPILOG)
 def full_recall(
     query: str = typer.Argument(help="Search query to find relevant knowledge."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
@@ -29,7 +30,7 @@ def full_recall(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
+        help=ACL_HELP,
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Search indexed knowledge — use 'hydradb query --kind knowledge'."""
@@ -49,7 +50,7 @@ def full_recall(
     )
 
 
-@app.command("preferences")
+@app.command("preferences", epilog=ACL_WARNING_EPILOG)
 def recall_preferences(
     query: str = typer.Argument(help="Search query to find relevant user memories."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
@@ -65,7 +66,7 @@ def recall_preferences(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
+        help=ACL_HELP,
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Search user memories — use 'hydradb query --kind memory'."""
@@ -86,7 +87,7 @@ def recall_preferences(
     )
 
 
-@app.command("keyword")
+@app.command("keyword", epilog=ACL_WARNING_EPILOG)
 def keyword_recall(
     query: str = typer.Argument(help="Keyword search terms."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
@@ -99,7 +100,7 @@ def keyword_recall(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
+        help=ACL_HELP,
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Keyword/boolean search — use 'hydradb query --operator'."""

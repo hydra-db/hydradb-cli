@@ -62,14 +62,27 @@ def _with_warnings(data: Any, meta: Any) -> Any:
     from hydradb_cli.output import err_console
 
     meta = _dump(meta)
-    warnings = meta.get("warnings") if isinstance(meta, dict) else None
-    if not isinstance(warnings, list) or not warnings:
+    raw_warnings = meta.get("warnings") if isinstance(meta, dict) else None
+    if not isinstance(raw_warnings, list):
+        return data
+    warnings = []
+    for warning in raw_warnings:
+        warning = _dump(warning)
+        if (
+            isinstance(warning, dict)
+            and isinstance(warning.get("code"), str)
+            and warning["code"]
+            and (warning.get("message") is None or isinstance(warning["message"], str))
+        ):
+            warnings.append(warning)
+    if not warnings:
         return data
     # stderr also covers list payloads and human formatters which omit metadata.
     for warning in warnings:
         err_console.print("warning: " + json.dumps(_dump(warning), ensure_ascii=False), markup=False)
-    if isinstance(data, dict) and "warnings" not in data:
-        return {**data, "warnings": warnings}
+    if isinstance(data, dict):
+        key = "response_warnings" if "warnings" in data else "warnings"
+        return {**data, key: warnings}
     return data
 
 

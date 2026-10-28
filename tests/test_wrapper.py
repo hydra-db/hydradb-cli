@@ -765,3 +765,17 @@ class TestAclEnforcementSync:
         result = _unwrap_payload({"success": True, "data": [1, 2], "meta": {"warnings": [{"code": "warning-code"}]}})
         assert result == [1, 2]
         assert "warning-code" in capsys.readouterr().err
+
+    def test_payload_warning_collision_preserves_envelope_warnings(self, capsys):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload warning"]},
+                "meta": {"warnings": [None, {"message": "missing-code"}, warning]},
+            }
+        )
+        assert result == {"warnings": ["payload warning"], "response_warnings": [warning]}
+        assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err

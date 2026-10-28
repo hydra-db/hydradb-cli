@@ -498,20 +498,50 @@ def test_no_credential_schema_error_does_not_name_a_flag_that_exists_nowhere():
     assert "--credentials-stdin" in text
 
 
-def test_provider_acl_details():
+@pytest.mark.parametrize("supported", [True, False])
+def test_provider_acl_details(supported):
     _auth()
-    w = _wrapper(provider={**SLACK_SCHEMA, "acl_supported": True, "acl_description": "Uses identities"})
+    w = _wrapper(provider={**SLACK_SCHEMA, "acl_supported": supported, "acl_description": "Uses identities"})
     with _patch(w):
         result = runner.invoke(app, ["connectors", "providers", "slack"], env=_WIDE)
     assert result.exit_code == 0
     assert "acl_supported" in result.output
+    assert str(supported).lower() in result.output.lower()
     assert "Uses identities" in result.output
 
 
-@pytest.mark.parametrize("command", ["query", "list", "inspect", "relations", "subgraph"])
+def test_provider_acl_details_remain_absent_when_api_omits_them():
+    _auth()
+    w = _wrapper(provider=SLACK_SCHEMA)
+    with _patch(w):
+        result = runner.invoke(app, ["connectors", "providers", "slack"], env=_WIDE)
+    assert result.exit_code == 0
+    assert "acl_supported   │ —" in result.output
+    assert "acl_description │ —" in result.output
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["query"],
+        ["list"],
+        ["inspect"],
+        ["relations"],
+        ["subgraph"],
+        ["recall", "full"],
+        ["recall", "preferences"],
+        ["recall", "keyword"],
+        ["fetch", "content"],
+        ["fetch", "sources"],
+        ["fetch", "relations"],
+        ["memories", "list"],
+    ],
+)
 def test_acl_help_explains_connector_enforcement(command):
-    result = runner.invoke(app, [command, "--help"], env=_WIDE)
+    result = runner.invoke(app, [*command, "--help"], env={"COLUMNS": "80", "TERM": "dumb", "NO_COLOR": "1"})
     assert result.exit_code == 0
     help_text = " ".join(result.output.replace("│", " ").split())
     assert "authenticated caller" in help_text
     assert "ignore supplied ACL" in help_text
+    assert "eligible human sessions can change connector enforcement" in help_text
+    assert "acl_ignored_by_connector_enforcement" in help_text
