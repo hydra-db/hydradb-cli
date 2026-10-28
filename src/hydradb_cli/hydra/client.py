@@ -53,6 +53,26 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
+def _with_warnings(data: Any, meta: Any) -> Any:
+    """Keep envelope warnings without replacing the response payload shape.
+
+    SDK 2.1.7 has no generated warnings field, but retains unknown metadata
+    as pydantic extras. Raw endpoints supply the same metadata as dictionaries.
+    """
+    from hydradb_cli.output import err_console
+
+    meta = _dump(meta)
+    warnings = meta.get("warnings") if isinstance(meta, dict) else None
+    if not isinstance(warnings, list) or not warnings:
+        return data
+    # stderr also covers list payloads and human formatters which omit metadata.
+    for warning in warnings:
+        err_console.print("warning: " + json.dumps(_dump(warning), ensure_ascii=False), markup=False)
+    if isinstance(data, dict) and "warnings" not in data:
+        return {**data, "warnings": warnings}
+    return data
+
+
 def _unwrap(obj: Any) -> Any:
     """Return the plain-dict payload for an SDK response.
 
@@ -61,7 +81,7 @@ def _unwrap(obj: Any) -> Any:
     """
     if _is_envelope(obj):
         data = _dump(obj.data)
-        return data if data is not None else {}
+        return _with_warnings(data if data is not None else {}, obj.meta)
     dumped = _dump(obj)
     return dumped if dumped is not None else {}
 
@@ -80,7 +100,11 @@ def _unwrap_payload(body: Any) -> Any:
     """
     if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
         data = body["data"]
-        return data if data is not None else {}
+        result = _with_warnings(data if data is not None else {}, body.get("meta"))
+        rid = _request_id_of(body)
+        if rid and isinstance(result, dict) and "request_id" not in result:
+            result["request_id"] = rid
+        return result
     return body if body is not None else {}
 
 
@@ -426,6 +450,8 @@ class _Context(_Resource):
         if isinstance(data, dict):
             inner = data.get("inner")
             if isinstance(inner, dict):
+                if "warnings" in data and "warnings" not in inner:
+                    inner["warnings"] = data["warnings"]
                 return inner
             if "inner" in data:
                 return {k: v for k, v in data.items() if k != "inner"}
@@ -849,7 +875,27 @@ class _Connectors(_Resource):
         credentials: dict | None = None,
         auth_type: str | None = None,
         sync_interval_seconds: int | None = None,
+        enforce_acl: bool | None = None,
     ) -> dict:
+        # SDK 2.1.7 cannot serialize enforce_acl. Use the equivalent v2 JSON
+        # transport only when explicitly set until a released SDK adds it.
+        if enforce_acl is not None:
+            body = {
+                k: v
+                for k, v in {
+                    "provider": provider,
+                    "name": name,
+                    "database": self._w._require_database(database),
+                    "collection": self._w._resolve_collection(collection),
+                    "provider_account_scope": provider_account_scope,
+                    "credentials": credentials,
+                    "auth_type": auth_type,
+                    "sync_interval_seconds": sync_interval_seconds,
+                    "enforce_acl": enforce_acl,
+                }.items()
+                if v is not None
+            }
+            return self._w._raw_post("/connectors", json_body=body)
         resp = self._invoke(
             self._w._sdk.connectors.create,
             provider=provider,
@@ -1020,10 +1066,7 @@ class HydraDB:
 
         # Unwrap by SHAPE, never by assumption: the connector endpoints mostly
         # return bare objects rather than a HandlerEnvelope.
-        if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
-            data = body["data"]
-            return data if data is not None else {}
-        return body if body is not None else {}
+        return _unwrap_payload(body)
 
     def _raw_post(self, path: str, *, json_body: Any) -> Any:
         """POST an endpoint the SDK cannot express, with the same error contract.

@@ -45,7 +45,9 @@ def list_memories(
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
 ) -> None:
     """[dim](deprecated)[/dim] List memories — use 'hydradb list --kind memory'."""

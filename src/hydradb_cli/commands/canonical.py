@@ -65,7 +65,7 @@ def query(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -187,7 +187,7 @@ def list_items(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -207,7 +207,7 @@ def inspect(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -245,7 +245,7 @@ def relations(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -267,7 +267,7 @@ def subgraph(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). The subgraph contains only items those principals may see. Omit to search everything the API key can reach.",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),

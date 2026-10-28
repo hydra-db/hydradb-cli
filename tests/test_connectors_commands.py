@@ -496,3 +496,34 @@ def test_no_credential_schema_error_does_not_name_a_flag_that_exists_nowhere():
     # It should say WHY it cannot prompt, and give a route that works.
     assert "did not declare a credential schema" in text
     assert "--credentials-stdin" in text
+
+
+@pytest.mark.parametrize("flag,value", [(None, None), ("--enforce-acl", True), ("--no-enforce-acl", False)])
+def test_create_acl_option(flag, value):
+    _auth()
+    w = _wrapper()
+    args = ["connectors", "create", "--provider", "slack", "--credentials-stdin"]
+    if flag:
+        args.append(flag)
+    with _patch(w):
+        result = runner.invoke(app, args, input='{"access_token":"test"}', env=_WIDE)
+    assert result.exit_code == 0, result.output
+    assert w.connectors.create.call_args.kwargs["enforce_acl"] is value
+
+
+def test_provider_acl_details():
+    _auth()
+    w = _wrapper(provider={**SLACK_SCHEMA, "acl_supported": True, "acl_description": "Uses identities"})
+    with _patch(w):
+        result = runner.invoke(app, ["connectors", "providers", "slack"], env=_WIDE)
+    assert result.exit_code == 0
+    assert "acl_supported" in result.output
+    assert "Uses identities" in result.output
+
+
+@pytest.mark.parametrize("command", ["query", "list", "inspect", "relations", "subgraph"])
+def test_acl_help_explains_connector_enforcement(command):
+    result = runner.invoke(app, [command, "--help"], env=_WIDE)
+    assert result.exit_code == 0
+    assert "acl_ignored_by_connector_enforcement" in result.output
+    assert "authenticated caller" in result.output

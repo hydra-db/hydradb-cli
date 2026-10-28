@@ -18,7 +18,9 @@ def content(
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
     mode: str = typer.Option("content", "--mode", help="Fetch mode: 'content', 'url', or 'both'."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Fetch source content — use 'hydradb inspect'."""
@@ -36,7 +38,9 @@ def sources(
     page: int | None = typer.Option(None, "--page", help="Page number (1-indexed)."),
     page_size: int | None = typer.Option(None, "--page-size", help="Items per page (1-100)."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
 ) -> None:
     """[dim](deprecated)[/dim] List ingested sources — use 'hydradb list'."""
@@ -64,7 +68,9 @@ def relations(
     ),
     limit: int | None = typer.Option(None, "--limit", help="Maximum number of relations to return."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Fetch graph relations — use 'hydradb relations'."""

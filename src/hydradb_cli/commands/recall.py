@@ -27,7 +27,9 @@ def full_recall(
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Search indexed knowledge — use 'hydradb query --kind knowledge'."""
@@ -61,7 +63,9 @@ def recall_preferences(
     ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Search user memories — use 'hydradb query --kind memory'."""
@@ -93,7 +97,9 @@ def keyword_recall(
         None, "--search-mode", help="What to search: 'sources' (knowledge) or 'memories'."
     ),
     acl: list[str] | None = typer.Option(
-        None, "--acl", help="Principals to answer as (permission-aware search). Repeatable."
+        None,
+        "--acl",
+        help="Optional principals for non-enforced connectors (repeatable). Enforced connectors use the authenticated caller and ignore supplied ACL, reporting acl_ignored_by_connector_enforcement.",
     ),
 ) -> None:
     """[dim](deprecated)[/dim] Keyword/boolean search — use 'hydradb query --operator'."""
