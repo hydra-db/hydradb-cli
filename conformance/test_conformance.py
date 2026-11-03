@@ -80,6 +80,11 @@ def _endpoint_matches(recorder: Recorder, op: str) -> bool:
 def test_wrapper_emits_canonical_call(vector, wrapper, recorder):
     op = vector["call"]["op"]
     args = vector["call"].get("args", {})
+    # A vector that names the CLI in optional_for and uses an op the CLI does not
+    # ship yet (the connector-* vectors, CONTRACT.md section 4) is skipped. Optional
+    # vectors whose op the CLI does ship still run, so existing coverage stays.
+    if "cli" in vector.get("optional_for", []) and op not in OP_ENDPOINT:
+        pytest.skip(f"{vector['id']}: optional for cli, op {op} not shipped by the CLI yet")
     expect = vector["expect"]
     sdk = expect["sdk"]
 
