@@ -545,3 +545,9 @@ def test_acl_help_explains_connector_enforcement(command):
     assert "ignore supplied ACL" in help_text
     assert "eligible human sessions can change connector enforcement" in help_text
     assert "acl_ignored_by_connector_enforcement" in help_text
+
+
+def test_connector_pause_reason_is_visible():
+    from hydradb_cli.commands.connectors import _connector_rows
+
+    assert ("paused_reason", "quota exhausted") in _connector_rows({"paused_reason": "quota exhausted"})

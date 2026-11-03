@@ -811,3 +811,56 @@ class TestAclEnforcementSync:
             "warnings": ["payload"],
             "response_warnings": [warning],
         }
+
+
+def test_query_table_options_and_new_response_fields(monkeypatch):
+    captured = {}
+    payload = {
+        "chunks": [{"chunk_content": "hello", "chunk_metadata": {"page": 2}}],
+        "tabular_data": {"sql": "select 1"},
+        "temporal_facts": [{"observed_at": "2026-01-01T00:00:00Z"}],
+        "graph_context": {"query_paths": [{"source_id": "s", "read_status": "ready"}]},
+    }
+
+    def post(url, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": payload, "meta": {"warnings": [{"code": "partial", "collections": ["c"]}]}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db", collection="c")
+    result = w.context.query(query="q", include_table_sql=False, table_limit=3)
+    assert captured["json"]["include_table_sql"] is False
+    assert captured["json"]["table_limit"] == 3
+    for key, value in payload.items():
+        assert result[key] == value
+    assert result["warnings"][0]["collections"] == ["c"]
+
+
+def test_sdk_query_preserves_additive_response_fields():
+    payload = {
+        "chunks": [{"chunk_content": "hello", "chunk_metadata": {"page": 2}}],
+        "tabular_data": {"sql": "select 1"},
+        "temporal_facts": [{"observed_at": "2026-01-01T00:00:00Z"}],
+        "graph_context": {"query_paths": [{"source_id": "s", "read_status": "ready"}]},
+    }
+    w = _wrapper_with_response({"success": True, "data": payload, "meta": {}})
+    result = w.context.query(query="q")
+    for key, value in payload.items():
+        assert result[key] == value
+
+
+def test_sdk_relations_and_connector_preserve_provenance():
+    evidence = {"database": "db", "collection": "c", "source_id": "s", "read_status": "ready"}
+    relations = {"relations": [{"source": {"name": "a", **evidence}, "target": {"name": "b"}, "relations": [evidence]}]}
+    w = _wrapper_with_response({"success": True, "data": relations, "meta": {}})
+    result = w.context.relations(id="s")
+    assert result["relations"][0]["source"]["source_id"] == "s"
+    assert result["relations"][0]["relations"][0]["read_status"] == "ready"
+    w = _wrapper_with_response({"connector_id": "c1", "paused_reason": "quota"})
+    assert w.connectors.get("c1")["paused_reason"] == "quota"
+    w = _wrapper_with_response({"connectors": [{"connector_id": "c1", "paused_reason": "quota"}]})
+    assert w.connectors.list()[0]["paused_reason"] == "quota"

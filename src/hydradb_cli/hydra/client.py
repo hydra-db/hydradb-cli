@@ -284,6 +284,8 @@ class _Context(_Resource):
         alpha: float | None = None,
         recency_bias: float | None = None,
         graph_context: bool | None = None,
+        include_table_sql: bool | None = None,
+        table_limit: int | None = None,
         additional_context: str | None = None,
         query_by: str | None = None,
         titles: list[str] | None = None,
@@ -298,11 +300,10 @@ class _Context(_Resource):
         database_name = self._w._require_database(database)
         collection_name = self._w._resolve_collection(collection)
 
-        # hydradb-sdk 2.1.4 predates the titles field and would reject the
-        # unknown keyword before sending a request. Use the wrapper's equivalent
-        # v2 JSON transport only for title-filtered queries until the generated
-        # SDK exposes it; ordinary queries remain on the SDK path.
-        if titles:
+        # Published SDKs do not yet support the table options; older supported
+        # releases also lack titles. Use the equivalent v2 JSON transport when
+        # these fields are supplied; ordinary queries stay on the SDK path.
+        if titles or include_table_sql is not None or table_limit is not None:
             body = {
                 key: value
                 for key, value in {
@@ -314,6 +315,8 @@ class _Context(_Resource):
                     "alpha": alpha,
                     "recency_bias": recency_bias,
                     "graph_context": graph_context,
+                    "include_table_sql": include_table_sql,
+                    "table_limit": table_limit,
                     "additional_context": additional_context,
                     "query_by": query_by,
                     "titles": titles,

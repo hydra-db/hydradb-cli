@@ -10,6 +10,7 @@ to the SDK directly.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -89,10 +90,13 @@ def _feedback_hint(r: dict) -> str:
 
 def _format_query_result(r: dict):
     chunks = r.get("chunks") or []
-    if not chunks:
+    tables = r.get("tabular_data")
+    if not chunks and not tables:
         return "[dim]No relevant results found.[/dim]" + _feedback_hint(r)
 
     panels: list[Any] = []
+    if tables:
+        panels.append(Panel(Text(json.dumps(tables, ensure_ascii=False, indent=2)), title="Tabular data"))
     for i, chunk in enumerate(chunks, 1):
         score = chunk.get("relevancy_score")
         score_str = f" • {score:.0%}" if score is not None else ""
@@ -135,6 +139,8 @@ def do_query(
     alpha: float | None = None,
     recency_bias: float | None = None,
     graph_context: bool | None = None,
+    include_table_sql: bool | None = None,
+    table_limit: int | None = None,
     additional_context: str | None = None,
     titles: list[str] | None = None,
     acl: list[str] | None = None,
@@ -185,6 +191,8 @@ def do_query(
             alpha=alpha,
             recency_bias=recency_bias,
             graph_context=graph_context,
+            include_table_sql=include_table_sql,
+            table_limit=table_limit,
             additional_context=additional_context,
             titles=clean_titles,
             acl=acl,

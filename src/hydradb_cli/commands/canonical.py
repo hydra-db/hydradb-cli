@@ -57,6 +57,12 @@ def query(
     graph_context: bool | None = typer.Option(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
+    include_table_sql: bool | None = typer.Option(
+        None, "--include-table-sql/--no-include-table-sql", help="Include SQL for tabular results."
+    ),
+    table_limit: int | None = typer.Option(
+        None, "--table-limit", min=1, max=100, help="Maximum number of table rows (1-100)."
+    ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
     titles: list[str] | None = typer.Option(
         None,
@@ -84,6 +90,8 @@ def query(
         alpha=alpha,
         recency_bias=recency_bias,
         graph_context=graph_context,
+        include_table_sql=include_table_sql,
+        table_limit=table_limit,
         additional_context=additional_context,
         titles=list(titles) if titles else None,
         acl=list(acl) if acl else None,
