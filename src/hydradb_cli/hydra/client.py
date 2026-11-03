@@ -16,7 +16,10 @@ Responsibilities (CONTRACT §2):
 
 from __future__ import annotations
 
+import email.utils
 import json
+import random
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -152,6 +155,38 @@ def _request_id_of(obj: Any) -> str | None:
     if rid is None and isinstance(meta, dict):
         rid = meta.get("request_id")
     return rid if isinstance(rid, str) and rid else None
+
+
+def _query_retry_delay(response: httpx.Response | None, retries: int) -> float:
+    """Mirror the SDK's retry-after and exponential-backoff policy for reads."""
+    if response is not None:
+        headers = response.headers
+        value = headers.get("retry-after-ms")
+        try:
+            delay = int(value) / 1000 if value is not None else 0
+        except ValueError:
+            delay = 0
+        if delay > 0:
+            return min(delay, 60.0)
+        value = headers.get("retry-after")
+        if value:
+            try:
+                delay = (
+                    float(int(value))
+                    if value.strip().isdigit()
+                    else email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+                )
+            except (ValueError, TypeError, OverflowError):
+                delay = 0
+            if delay > 0:
+                return min(delay, 60.0)
+        try:
+            reset_delay = int(headers.get("x-ratelimit-reset", "0")) - time.time()
+        except ValueError:
+            reset_delay = 0
+        if reset_delay > 0:
+            return min(reset_delay, 60.0) * (1 + random.random() * 0.2)  # noqa: S311
+    return min(2.0**retries, 60.0) * (0.9 + random.random() * 0.2)  # noqa: S311
 
 
 def _bool_str(value: bool | None) -> str | None:
@@ -326,7 +361,7 @@ class _Context(_Resource):
                 }.items()
                 if value is not None
             }
-            result = self._w._raw_post("/query", json_body=body)
+            result = self._w._raw_post("/query", json_body=body, read_only=True)
             return result if isinstance(result, dict) else {}
 
         resp = self._invoke(
@@ -1079,7 +1114,7 @@ class HydraDB:
         # return bare objects rather than a HandlerEnvelope.
         return _unwrap_payload(body)
 
-    def _raw_post(self, path: str, *, json_body: Any) -> Any:
+    def _raw_post(self, path: str, *, json_body: Any, read_only: bool = False) -> Any:
         """POST an endpoint the SDK cannot express, with the same error contract.
 
         The sibling of :meth:`_raw_get` (CONTRACT §2 rule 7). Same auth and
@@ -1090,15 +1125,27 @@ class HydraDB:
             "Authorization": f"Bearer {self._token}",
             "API-Version": "2",
         }
-        try:
-            response = httpx.post(
-                f"{self._base_url.rstrip('/')}{path}",
-                headers=headers,
-                json=json_body,
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise translate_sdk_error(exc) from exc
+        # Retry only explicitly read-only POSTs. Mutations must never inherit
+        # query retries because an ambiguous failure may already have committed.
+        for attempt in range(3 if read_only else 1):
+            try:
+                response = httpx.post(
+                    f"{self._base_url.rstrip('/')}{path}",
+                    headers=headers,
+                    json=json_body,
+                    timeout=self._timeout,
+                )
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                if read_only and attempt < 2:
+                    time.sleep(_query_retry_delay(None, attempt))
+                    continue
+                raise translate_sdk_error(exc) from exc
+            except httpx.HTTPError as exc:
+                raise translate_sdk_error(exc) from exc
+            if read_only and attempt < 2 and (response.status_code >= 500 or response.status_code in (408, 409, 429)):
+                time.sleep(_query_retry_delay(response, attempt))
+                continue
+            break
 
         try:
             body = response.json() if response.content else None

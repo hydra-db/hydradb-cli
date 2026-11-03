@@ -864,3 +864,82 @@ def test_sdk_relations_and_connector_preserve_provenance():
     assert w.connectors.get("c1")["paused_reason"] == "quota"
     w = _wrapper_with_response({"connectors": [{"connector_id": "c1", "paused_reason": "quota"}]})
     assert w.connectors.list()[0]["paused_reason"] == "quota"
+
+
+@pytest.mark.parametrize("table_options", [{}, {"include_table_sql": False, "table_limit": 3}, {"titles": ["doc"]}])
+def test_query_retries_transient_http_failure(monkeypatch, table_options):
+    import hydra_db.core.http_client as sdk_http
+
+    monkeypatch.setattr(sdk_http.time, "sleep", lambda _: None)
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, json={"error": "temporary"})
+        return httpx.Response(200, json={"success": True, "data": {"chunks": []}, "meta": {}})
+
+    w = HydraDB(token="x", base_url="http://test.local", database="db", collection="c")
+    w._sdk = _SdkHydraDB(
+        token="x", base_url="http://test.local", httpx_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    monkeypatch.setattr(httpx, "post", lambda url, **kwargs: handler(httpx.Request("POST", url, json=kwargs["json"])))
+    assert w.context.query(query="q", **table_options)["chunks"] == []
+    assert len(requests) == 2
+    assert json.loads(requests[0].content) == json.loads(requests[1].content)
+
+
+def test_raw_mutations_do_not_retry(monkeypatch):
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(503, json={"error": "temporary"})
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db")
+    with pytest.raises(HydraDBClientError):
+        w._raw_post("/feedback", json_body={"feedback": "x"})
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status,expected_attempts", [(400, 1), (408, 3), (409, 3), (429, 3), (503, 3)])
+def test_raw_query_retry_status_and_exhaustion(monkeypatch, status, expected_attempts):
+    import hydradb_cli.hydra.client as client
+
+    monkeypatch.setattr(client.time, "sleep", lambda _: None)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(status, json={"error": "failure"})
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db")
+    with pytest.raises(HydraDBClientError) as error:
+        w.context.query(query="q", table_limit=1)
+    assert error.value.status_code == status
+    assert len(calls) == expected_attempts
+
+
+def test_raw_query_retries_connect_error_and_honors_retry_after(monkeypatch):
+    import hydradb_cli.hydra.client as client
+
+    delays = []
+    monkeypatch.setattr(client.time, "sleep", delays.append)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectError("temporary")
+        if len(calls) == 2:
+            return httpx.Response(429, headers={"retry-after": "3"})
+        return httpx.Response(200, json={"success": True, "data": {"chunks": []}, "meta": {}})
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db")
+    assert w.context.query(query="q", include_table_sql=True)["chunks"] == []
+    assert len(calls) == 3
+    assert 0.9 <= delays[0] <= 1.1
+    assert delays[1] == 3
