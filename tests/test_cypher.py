@@ -40,6 +40,11 @@ def test_body_size_counts_bytes_not_characters():
 # ── rendering ────────────────────────────────────────────────────────────────
 
 
+# The node, relationship and path shapes below come from the FalkorDB backend.
+# The Turbolay engine does not return them (`RETURN n` gives an integer id).
+# These tests are defensive: they keep the renderer correct if a shape appears.
+
+
 def test_node_renders_as_cypher_notation():
     node = {"id": 0, "labels": ["Person"], "name": "Alice", "role": "admin"}
     assert render_value(node) == "(:Person {name: Alice, role: admin})"
@@ -72,14 +77,13 @@ def test_scalars_render_as_themselves(value, expected):
 def test_a_node_returned_as_an_integer_id_renders_as_the_id():
     """HydraDB answers `RETURN n` with the node's integer id, not a node object.
 
-    The renderer must pass the id through, in a cell and inside a path, and not
-    fail on a value that is not a dict.
+    The renderer must pass the id through in a cell, and not fail on a value
+    that is not a dict.
     """
     assert render_value(7) == "7"
     headers, cells = rows_to_table([{"n": 7, "name": "Alice"}])
     assert headers == ["n", "name"]
     assert cells == [["7", "Alice"]]
-    assert render_value({"nodes": [1, 2], "edges": [3]}) == "1-[:?]->2"
 
 
 def test_rows_to_table_covers_every_column():

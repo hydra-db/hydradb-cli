@@ -414,30 +414,45 @@ Writes:
   `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})`.
 - Upsert nodes in a batch. Use exactly one label, and set it with `SET`:
   `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`.
+- Create edges in a batch, with no labels or properties in the pattern:
+  `UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`. A re-run of
+  the same batch does not add edges. A single `CREATE` of an edge adds a new edge each
+  time it runs.
 - Update by id: `MATCH (n:Person {id: 1}) SET n.age = 31`.
-- Delete: `MATCH (n:Person) DETACH DELETE n`, or `DELETE r` on a typed relationship.
+- Delete: `MATCH (n:Person) DETACH DELETE n`, `DELETE r` on a typed relationship, or many
+  nodes with `UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n` and
+  `{"rows": [{"id": 4}]}`.
+- An edge to an `id` that does not exist creates a node with that `id` and no label.
+  Load nodes before their edges.
+- If you write an existing `id` with a second label, the node gets both labels.
 - Refused: a node without an edge (`CREATE (:Person {name: 'a'})`), `CREATE ... RETURN ...`,
   `MATCH (a), (b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`,
-  writes inside `CALL { ... }`, and `CREATE INDEX`. The engine manages indexes.
+  writes inside `CALL { ... }`, `UNWIND $ids AS id MATCH (n {id: id}) ...` (send row maps
+  instead), and `CREATE INDEX`.
 
 Reads:
 
 - Supported: `MATCH` with labels and properties, typed traversal (also bounded
-  variable-length, `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `UNWIND`,
+  variable-length, `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `WITH`,
   `ORDER BY` / `SKIP` / `LIMIT`, `count` / `sum` / `avg` / `collect` / `min` / `max`, `CASE`,
   `EXISTS { ... }`, string functions, parameters, map and list literals, and read-only
   `CALL { ... }` subqueries.
 - Refused: `type()`, `id()`, `labels()`, `keys()`, `properties()`, `nodes()`,
   `relationships()`, `startNode()`, `endNode()`, `elementId()`, `shortestPath`, and
   untyped relationship patterns such as `(a)--(b)` or `()-[r]->()`.
+- A read that starts with `UNWIND` has one shape only: one `UNWIND` over a list of plain
+  values (not maps), one `MATCH` and a final `RETURN`, such as
+  `UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name`. It cannot have
+  `WHERE`, `WITH`, `OPTIONAL MATCH`, `ORDER BY`, `SKIP`, `LIMIT` or `UNION`.
 - `RETURN n` gives the node's integer id, not a node object. Return properties
   (`n.name`) instead.
 
 There is no schema command. To see what a collection holds, query the labels you wrote,
 for example `MATCH (n:Person) RETURN count(n)`.
 
-**Deletes.** A deleted collection or database leaves the API at once. Its storage is
-freed later. Do not write to a collection while you delete it: a write at the same time
+**Deletes.** A collection leaves the list when its delete succeeds. A very large
+collection can need a retry: the command fails, and the next run continues where it
+stopped. The storage is retained. Do not write to a collection while you delete it: a write at the same time
 can survive the delete.
 
 **The CLI does not inspect your Cypher.** There is no `--read-only` flag and no local
@@ -445,7 +460,10 @@ pre-rejection of unsupported constructs. Your query is sent verbatim and the ser
 rules on it.
 
 The request cap and the `graph load` rules *are* checked locally: the label, the key and
-every property name must be identifiers, and every `--key` value must be an integer.
+every property name must be identifiers, every `--key` value must be a non-negative
+integer, every row must have the same fields, and every value must be a string, boolean,
+integer or finite number (not null, a list or an object). A row whose `id` field differs from `--key` gets a warning: the node id
+is the `--key` value.
 
 Requests are capped at 256 KiB (enforced locally, before upload) and large result sets
 are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.

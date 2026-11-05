@@ -335,9 +335,9 @@ def test_load_chunks_and_merges(tmp_path):
     )
 
 
-@pytest.mark.parametrize("value", ["7", 7.5, True, None])
+@pytest.mark.parametrize("value", ["7", 7.5, True, None, -5])
 def test_load_rejects_a_merge_key_that_is_not_an_integer(tmp_path, value):
-    """HydraDB graph nodes use integer ids, so a string key fails server-side."""
+    """HydraDB graph nodes use non-negative integer ids; anything else fails server-side."""
     _auth()
     path = tmp_path / "rows.json"
     path.write_text(json.dumps([{"ext_id": 1}, {"ext_id": value}]))
@@ -347,8 +347,94 @@ def test_load_rejects_a_merge_key_that_is_not_an_integer(tmp_path, value):
         result = runner.invoke(app, ["graph", "load", str(path), "--label", "Person", "--key", "ext_id"], env=_WIDE)
 
     assert result.exit_code == 1
-    assert "must be an integer" in _text(result)
+    assert "must be a non-negative integer" in _text(result)
     w.graph.query.assert_not_called()
+
+
+def _load(tmp_path, rows, key="ext_id"):
+    """Run `graph load` on rows with a mocked wrapper; return (result, wrapper)."""
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps(rows))
+    w = _wrapper()
+    with _patch(w):
+        result = runner.invoke(app, ["graph", "load", str(path), "--label", "Person", "--key", key], env=_WIDE)
+    return result, w
+
+
+def test_load_rejects_rows_with_a_missing_field(tmp_path):
+    """The server refuses a batch whose rows do not all have the same fields."""
+    result, w = _load(tmp_path, [{"ext_id": 1, "name": "A", "age": 3}, {"ext_id": 2, "name": "B"}])
+
+    assert result.exit_code == 1
+    text = _text(result)
+    assert "Row index 1" in text
+    assert "missing age" in text
+    assert "same fields" in text
+    w.graph.query.assert_not_called()
+
+
+def test_load_rejects_rows_with_an_extra_field(tmp_path):
+    result, w = _load(tmp_path, [{"ext_id": 1}, {"ext_id": 2}, {"ext_id": 3, "name": "C"}])
+
+    assert result.exit_code == 1
+    assert "Row index 2" in _text(result)
+    assert "extra name" in _text(result)
+    w.graph.query.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("value", "kind"),
+    [(["x", "y"], "a list"), ({"a": 1}, "a JSON object"), (None, "null"), (2**63, "64-bit range")],
+)
+def test_load_rejects_a_value_the_server_refuses(tmp_path, value, kind):
+    """The server accepts string, boolean, 64-bit integer and finite float values only."""
+    result, w = _load(tmp_path, [{"ext_id": 1, "tags": "a"}, {"ext_id": 2, "tags": value}])
+
+    assert result.exit_code == 1
+    text = _text(result)
+    assert "Row index 1" in text
+    assert "'tags'" in text
+    assert kind in text
+    w.graph.query.assert_not_called()
+
+
+def test_load_accepts_every_supported_value_type(tmp_path):
+    result, w = _load(tmp_path, [{"ext_id": 1, "name": "A", "ok": True, "score": 1.5, "n": -3}])
+
+    assert result.exit_code == 0
+    w.graph.query.assert_called_once()
+
+
+def test_load_warns_when_an_id_field_differs_from_the_key(tmp_path):
+    """The node id comes from --key; a different `id` field is not loaded."""
+    result, w = _load(tmp_path, [{"ext_id": 1, "id": 1, "name": "A"}, {"ext_id": 2, "id": 99, "name": "B"}])
+
+    assert result.exit_code == 0
+    text = _text(result)
+    assert "Row index 1" in text
+    assert "'id' field differs" in text
+    assert w.graph.query.call_args.kwargs["query"] == (
+        "UNWIND $rows AS row MERGE (n {id: row.ext_id}) SET n:Person, n.ext_id = row.ext_id, n.name = row.name"
+    )
+
+
+def test_load_does_not_warn_when_the_id_field_matches_the_key(tmp_path):
+    result, w = _load(tmp_path, [{"ext_id": 1, "id": 1}, {"ext_id": 2, "id": 2}])
+
+    assert result.exit_code == 0
+    assert "differs" not in _text(result)
+    w.graph.query.assert_called_once()
+
+
+def test_load_accepts_id_as_the_key(tmp_path):
+    result, w = _load(tmp_path, [{"id": 0, "name": "A"}, {"id": 7, "name": "B"}], key="id")
+
+    assert result.exit_code == 0
+    assert "differs" not in _text(result)
+    assert w.graph.query.call_args.kwargs["query"] == (
+        "UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name"
+    )
 
 
 def test_load_rejects_a_property_name_that_is_not_an_identifier(tmp_path):

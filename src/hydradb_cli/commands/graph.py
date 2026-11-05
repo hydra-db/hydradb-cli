@@ -12,6 +12,7 @@ memories. See https://docs.hydradb.com/essentials/v2/graph-collections-byog
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +230,23 @@ def collections(
     console.print(make_table("Collection", rows=[[name] for name in names]))
 
 
+def _unsupported_value(value: Any) -> str:
+    """Describe a row value the server refuses in a batch, or return ''."""
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, dict):
+        return "a JSON object"
+    if isinstance(value, (bool, str)):
+        return ""
+    if isinstance(value, int):
+        return "" if -(2**63) <= value < 2**63 else "an integer outside the 64-bit range"
+    if isinstance(value, float):
+        return "" if math.isfinite(value) else "not a finite number"
+    return f"of type {type(value).__name__}"
+
+
 @app.command(name="load")
 def load(
     file: Path = typer.Argument(help="JSON file: an array of row objects."),
@@ -243,9 +261,13 @@ def load(
     """Bulk-load rows from a JSON file into a graph collection.
 
     Chunks the file into batches that fit inside the 256 KiB request cap and
-    the 30s write budget. Each row becomes one node. The --key value must be an
-    integer: it becomes the node id. The load MERGEs on that id, so you can
-    run a load again after it fails part-way.
+    the 30s write budget. Each row becomes one node. The --key value must be a
+    non-negative integer: it becomes the node id. The load MERGEs on that id,
+    so you can run a load again after it fails part-way.
+
+    Every row must have the same fields, and every value must be a string,
+    boolean, integer or finite number (not null, a list or an object). The
+    command checks the whole file before it sends a row.
     """
     _validate_collection(collection)
 
@@ -286,24 +308,66 @@ def load(
             "underscores only, starting with a letter or underscore."
         )
 
-    # HydraDB stores graph nodes by an integer id. Booleans are ints in
-    # Python, so exclude them by name.
-    not_int = [i for i, row in enumerate(rows) if isinstance(row[key], bool) or not isinstance(row[key], int)]
-    if not_int:
-        shown = ", ".join(str(i) for i in not_int[:5])
+    # HydraDB stores graph nodes by a non-negative integer id. Booleans are
+    # ints in Python, so exclude them by name.
+    not_id = [
+        i for i, row in enumerate(rows) if isinstance(row[key], bool) or not isinstance(row[key], int) or row[key] < 0
+    ]
+    if not_id:
+        shown = ", ".join(str(i) for i in not_id[:5])
         print_error(
-            f"The merge key '{key}' must be an integer in every row. HydraDB graph nodes use "
-            f"integer ids. Not an integer at row index: {shown}{' ...' if len(not_int) > 5 else ''}. "
+            f"The merge key '{key}' must be a non-negative integer in every row. HydraDB graph "
+            f"nodes use integer ids. Bad value at row index: {shown}{' ...' if len(not_id) > 5 else ''}. "
             "Nothing was loaded."
         )
 
+    # The server refuses a batch whose rows do not all have the same fields:
+    # every property in the query reads a field from every row.
+    expected = set(rows[0])
+    for i, row in enumerate(rows):
+        if set(row) != expected:
+            missing_fields = sorted(expected - set(row))
+            extra_fields = sorted(set(row) - expected)
+            detail = "; ".join(
+                part
+                for part in (
+                    f"missing {', '.join(missing_fields)}" if missing_fields else "",
+                    f"extra {', '.join(extra_fields)}" if extra_fields else "",
+                )
+                if part
+            )
+            print_error(
+                f"Row index {i} does not have the same fields as row index 0 ({detail}). "
+                "Every row must have the same fields. Add the missing fields to each row, or "
+                "split the file into one file per set of fields. Nothing was loaded."
+            )
+
+    # The server accepts only string, boolean, 64-bit integer and finite float
+    # values in a batch row. It refuses null, a list and an object.
+    for i, row in enumerate(rows):
+        for name, value in row.items():
+            problem = _unsupported_value(value)
+            if problem:
+                print_error(
+                    f"Row index {i}, field '{name}': the value is {problem}. A graph property must be "
+                    "a string, boolean, integer or finite number. Flatten a list or object, or store it "
+                    "as a JSON string. Leave out a null field from every row. Nothing was loaded."
+                )
+
+    # The node id comes from --key. A separate `id` field in the file is not
+    # loaded, so say so when it disagrees with the key.
+    if key != "id":
+        differs = [i for i, row in enumerate(rows) if "id" in row and row["id"] != row[key]]
+        if differs:
+            shown = ", ".join(str(i) for i in differs[:5])
+            print_warning(
+                f"Row index {shown}{' ...' if len(differs) > 5 else ''}: the 'id' field differs from "
+                f"'{key}'. The node id is the '{key}' value. The 'id' field is not loaded."
+            )
+
     # Every property name is written into the query text, so each one must be
     # a bare identifier, like the label and the key.
-    properties: list[str] = []
-    for row in rows:
-        for name in row:
-            if name not in properties and name != "id":
-                properties.append(name)
+    properties: list[str] = [name for name in rows[0] if name != "id"]
     bad = [name for name in properties if not CYPHER_IDENTIFIER.match(name)]
     if bad:
         print_error(
@@ -413,9 +477,10 @@ def collection_delete(
 ) -> None:
     """Drop one graph collection and all its data. Irreversible.
 
-    The collection leaves the API at once. Its storage is freed later. Do not
-    write to the collection while the delete runs: a write at the same time
-    can survive the delete.
+    The collection leaves the list when the delete succeeds. A very large
+    collection can need a retry: the command fails, and the next run continues
+    where it stopped. The storage is retained. Do not write to the collection
+    while the delete runs: a write at the same time can survive the delete.
     """
     _validate_collection(collection)
     if not yes:
