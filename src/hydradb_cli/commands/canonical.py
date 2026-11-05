@@ -15,6 +15,7 @@ import typer
 from rich.panel import Panel
 
 from hydradb_cli.commands import _impl
+from hydradb_cli.commands._acl import ACL_HELP
 from hydradb_cli.config import get_full_config
 from hydradb_cli.output import console, make_kv_table, print_error, print_json, spinner
 from hydradb_cli.utils.common import mask_api_key, read_stdin_safe, resolve_scope_flags
@@ -56,6 +57,12 @@ def query(
     graph_context: bool | None = typer.Option(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
+    include_table_sql: bool | None = typer.Option(
+        None, "--include-table-sql/--no-include-table-sql", help="Include SQL for tabular results."
+    ),
+    table_limit: int | None = typer.Option(
+        None, "--table-limit", min=1, max=100, help="Maximum number of table rows (1-100)."
+    ),
     additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
     titles: list[str] | None = typer.Option(
         None,
@@ -65,7 +72,7 @@ def query(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -83,6 +90,8 @@ def query(
         alpha=alpha,
         recency_bias=recency_bias,
         graph_context=graph_context,
+        include_table_sql=include_table_sql,
+        table_limit=table_limit,
         additional_context=additional_context,
         titles=list(titles) if titles else None,
         acl=list(acl) if acl else None,
@@ -187,7 +196,7 @@ def list_items(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -207,7 +216,7 @@ def inspect(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -245,7 +254,7 @@ def relations(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). Restricts results to documents whose access list admits one of them. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),
@@ -267,7 +276,7 @@ def subgraph(
     acl: list[str] | None = typer.Option(
         None,
         "--acl",
-        help="Principals to answer as, repeatable (--acl alice@corp.com --acl 'group:google:eng@corp.com'). The subgraph contains only items those principals may see. Omit to search everything the API key can reach.",
+        help=ACL_HELP,
     ),
     database: str | None = typer.Option(None, "--database", "-d", help="Database. Uses default if not specified."),
     collection: str | None = typer.Option(None, "--collection", help="Collection."),

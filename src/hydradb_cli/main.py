@@ -39,6 +39,7 @@ from hydradb_cli.commands import (
     recall,
     tenant,
 )
+from hydradb_cli.commands._acl import ACL_WARNING_EPILOG
 from hydradb_cli.output import console, set_output_format
 
 app = typer.Typer(
@@ -85,15 +86,17 @@ def main(
 
 
 # ── Canonical commands ───────────────────────────────────────────────────────
-app.command(name="query", help="Retrieve knowledge or memories.")(canonical.query)
+app.command(name="query", help="Retrieve knowledge or memories.", epilog=ACL_WARNING_EPILOG)(canonical.query)
 app.command(name="ingest", help="Store memories or knowledge (text or files).")(canonical.ingest)
-app.command(name="list", help="List ingested sources and memories.")(canonical.list_items)
-app.command(name="inspect", help="Fetch a source's content by ID.")(canonical.inspect)
+app.command(name="list", help="List ingested sources and memories.", epilog=ACL_WARNING_EPILOG)(canonical.list_items)
+app.command(name="inspect", help="Fetch a source's content by ID.", epilog=ACL_WARNING_EPILOG)(canonical.inspect)
 app.command(name="delete", help="Delete memories or knowledge sources.")(canonical.delete)
-app.command(name="relations", help="Explore knowledge-graph relations.")(canonical.relations)
-app.command(name="subgraph", help="Everything connected to one item: thread, replies, hierarchy, links.")(
-    canonical.subgraph
-)
+app.command(name="relations", help="Explore knowledge-graph relations.", epilog=ACL_WARNING_EPILOG)(canonical.relations)
+app.command(
+    name="subgraph",
+    help="Everything connected to one item: thread, replies, hierarchy, links.",
+    epilog=ACL_WARNING_EPILOG,
+)(canonical.subgraph)
 app.command(name="feedback", help="Report whether a query's results were useful.")(canonical.feedback)
 app.command(name="verify", help="Check per-source ingestion status.")(canonical.verify)
 app.command(name="doctor", help="Check config and API reachability.")(canonical.doctor)

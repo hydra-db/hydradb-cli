@@ -307,6 +307,8 @@ def _print_provider_detail(provider_id: str, detail: dict) -> None:
                 ("provider", detail.get("provider", provider_id)),
                 ("indexed objects", ", ".join(detail.get("indexed_object_types") or []) or "—"),
                 ("credentials", ", ".join(name for name, _ in fields) or "—"),
+                ("acl_supported", str(detail.get("acl_supported", "—"))),
+                ("acl_description", str(detail.get("acl_description") or "—")),
             ],
             title=f"Provider: {provider_id}",
         )
@@ -400,6 +402,7 @@ def _connector_rows(c: dict) -> list[tuple[str, str]]:
         ("scope", str(c.get("provider_account_scope") or "—")),
         ("status", str(c.get("status", "—"))),
         ("lifecycle", str(c.get("lifecycle", "—"))),
+        *(([("paused_reason", str(c["paused_reason"]))]) if c.get("paused_reason") else []),
     ]
 
 
@@ -420,6 +423,7 @@ def status(
         make_kv_table(
             [
                 ("sync_status", str(connector.get("sync_status", "—"))),
+                *(([("paused_reason", str(connector["paused_reason"]))]) if connector.get("paused_reason") else []),
                 ("last successful", _relative(connector.get("last_successful_sync_at"))),
                 ("last attempted", _relative(connector.get("last_attempted_sync_at"))),
                 ("next sync", _relative(connector.get("next_sync_at"))),

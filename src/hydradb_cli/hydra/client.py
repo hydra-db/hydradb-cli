@@ -16,7 +16,10 @@ Responsibilities (CONTRACT §2):
 
 from __future__ import annotations
 
+import email.utils
 import json
+import random
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -53,6 +56,52 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
+def _merge_warning_field(target: dict[str, Any], key: str, value: Any) -> None:
+    """Copy a payload warning field without replacing an existing value."""
+    if key not in target:
+        target[key] = value
+        return
+    collision_key = "response_warnings"
+    existing = target.get(collision_key, [])
+    existing_items = existing if isinstance(existing, list) else [existing]
+    value_items = value if isinstance(value, list) else [value]
+    target[collision_key] = [*existing_items, *value_items]
+
+
+def _with_warnings(data: Any, meta: Any) -> Any:
+    """Keep envelope warnings without replacing the response payload shape.
+
+    SDK 2.1.7 has no generated warnings field, but retains unknown metadata
+    as pydantic extras. Raw endpoints supply the same metadata as dictionaries.
+    """
+    from hydradb_cli.output import err_console
+
+    meta = _dump(meta)
+    raw_warnings = meta.get("warnings") if isinstance(meta, dict) else None
+    if not isinstance(raw_warnings, list):
+        return data
+    warnings = []
+    for warning in raw_warnings:
+        warning = _dump(warning)
+        if (
+            isinstance(warning, dict)
+            and isinstance(warning.get("code"), str)
+            and warning["code"]
+            and (warning.get("message") is None or isinstance(warning["message"], str))
+        ):
+            warnings.append(warning)
+    if not warnings:
+        return data
+    # stderr also covers list payloads and human formatters which omit metadata.
+    for warning in warnings:
+        err_console.print("warning: " + json.dumps(_dump(warning), ensure_ascii=False), markup=False)
+    if isinstance(data, dict):
+        result = dict(data)
+        _merge_warning_field(result, "warnings", warnings)
+        return result
+    return data
+
+
 def _unwrap(obj: Any) -> Any:
     """Return the plain-dict payload for an SDK response.
 
@@ -61,7 +110,7 @@ def _unwrap(obj: Any) -> Any:
     """
     if _is_envelope(obj):
         data = _dump(obj.data)
-        return data if data is not None else {}
+        return _with_warnings(data if data is not None else {}, obj.meta)
     dumped = _dump(obj)
     return dumped if dumped is not None else {}
 
@@ -80,7 +129,11 @@ def _unwrap_payload(body: Any) -> Any:
     """
     if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
         data = body["data"]
-        return data if data is not None else {}
+        result = _with_warnings(data if data is not None else {}, body.get("meta"))
+        rid = _request_id_of(body)
+        if rid and isinstance(result, dict) and "request_id" not in result:
+            result["request_id"] = rid
+        return result
     return body if body is not None else {}
 
 
@@ -102,6 +155,38 @@ def _request_id_of(obj: Any) -> str | None:
     if rid is None and isinstance(meta, dict):
         rid = meta.get("request_id")
     return rid if isinstance(rid, str) and rid else None
+
+
+def _query_retry_delay(response: httpx.Response | None, retries: int) -> float:
+    """Mirror the SDK's retry-after and exponential-backoff policy for reads."""
+    if response is not None:
+        headers = response.headers
+        value = headers.get("retry-after-ms")
+        try:
+            delay = int(value) / 1000 if value is not None else 0
+        except ValueError:
+            delay = 0
+        if delay > 0:
+            return min(delay, 60.0)
+        value = headers.get("retry-after")
+        if value:
+            try:
+                delay = (
+                    float(int(value))
+                    if value.strip().isdigit()
+                    else email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+                )
+            except (ValueError, TypeError, OverflowError):
+                delay = 0
+            if delay > 0:
+                return min(delay, 60.0)
+        try:
+            reset_delay = int(headers.get("x-ratelimit-reset", "0")) - time.time()
+        except ValueError:
+            reset_delay = 0
+        if reset_delay > 0:
+            return min(reset_delay, 60.0) * (1 + random.random() * 0.2)  # noqa: S311
+    return min(2.0**retries, 60.0) * (0.9 + random.random() * 0.2)  # noqa: S311
 
 
 def _bool_str(value: bool | None) -> str | None:
@@ -234,6 +319,8 @@ class _Context(_Resource):
         alpha: float | None = None,
         recency_bias: float | None = None,
         graph_context: bool | None = None,
+        include_table_sql: bool | None = None,
+        table_limit: int | None = None,
         additional_context: str | None = None,
         query_by: str | None = None,
         titles: list[str] | None = None,
@@ -248,11 +335,10 @@ class _Context(_Resource):
         database_name = self._w._require_database(database)
         collection_name = self._w._resolve_collection(collection)
 
-        # hydradb-sdk 2.1.4 predates the titles field and would reject the
-        # unknown keyword before sending a request. Use the wrapper's equivalent
-        # v2 JSON transport only for title-filtered queries until the generated
-        # SDK exposes it; ordinary queries remain on the SDK path.
-        if titles:
+        # Published SDKs do not yet support the table options; older supported
+        # releases also lack titles. Use the equivalent v2 JSON transport when
+        # these fields are supplied; ordinary queries stay on the SDK path.
+        if titles or include_table_sql is not None or table_limit is not None:
             body = {
                 key: value
                 for key, value in {
@@ -264,6 +350,8 @@ class _Context(_Resource):
                     "alpha": alpha,
                     "recency_bias": recency_bias,
                     "graph_context": graph_context,
+                    "include_table_sql": include_table_sql,
+                    "table_limit": table_limit,
                     "additional_context": additional_context,
                     "query_by": query_by,
                     "titles": titles,
@@ -273,7 +361,7 @@ class _Context(_Resource):
                 }.items()
                 if value is not None
             }
-            result = self._w._raw_post("/query", json_body=body)
+            result = self._w._raw_post("/query", json_body=body, read_only=True)
             return result if isinstance(result, dict) else {}
 
         resp = self._invoke(
@@ -426,7 +514,11 @@ class _Context(_Resource):
         if isinstance(data, dict):
             inner = data.get("inner")
             if isinstance(inner, dict):
-                return inner
+                flattened = dict(inner)
+                for key in ("warnings", "response_warnings"):
+                    if key in data:
+                        _merge_warning_field(flattened, key, data[key])
+                return flattened
             if "inner" in data:
                 return {k: v for k, v in data.items() if k != "inner"}
         return data
@@ -1020,12 +1112,9 @@ class HydraDB:
 
         # Unwrap by SHAPE, never by assumption: the connector endpoints mostly
         # return bare objects rather than a HandlerEnvelope.
-        if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
-            data = body["data"]
-            return data if data is not None else {}
-        return body if body is not None else {}
+        return _unwrap_payload(body)
 
-    def _raw_post(self, path: str, *, json_body: Any) -> Any:
+    def _raw_post(self, path: str, *, json_body: Any, read_only: bool = False) -> Any:
         """POST an endpoint the SDK cannot express, with the same error contract.
 
         The sibling of :meth:`_raw_get` (CONTRACT §2 rule 7). Same auth and
@@ -1036,15 +1125,27 @@ class HydraDB:
             "Authorization": f"Bearer {self._token}",
             "API-Version": "2",
         }
-        try:
-            response = httpx.post(
-                f"{self._base_url.rstrip('/')}{path}",
-                headers=headers,
-                json=json_body,
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise translate_sdk_error(exc) from exc
+        # Retry only explicitly read-only POSTs. Mutations must never inherit
+        # query retries because an ambiguous failure may already have committed.
+        for attempt in range(3 if read_only else 1):
+            try:
+                response = httpx.post(
+                    f"{self._base_url.rstrip('/')}{path}",
+                    headers=headers,
+                    json=json_body,
+                    timeout=self._timeout,
+                )
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                if read_only and attempt < 2:
+                    time.sleep(_query_retry_delay(None, attempt))
+                    continue
+                raise translate_sdk_error(exc) from exc
+            except httpx.HTTPError as exc:
+                raise translate_sdk_error(exc) from exc
+            if read_only and attempt < 2 and (response.status_code >= 500 or response.status_code in (408, 409, 429)):
+                time.sleep(_query_retry_delay(response, attempt))
+                continue
+            break
 
         try:
             body = response.json() if response.content else None

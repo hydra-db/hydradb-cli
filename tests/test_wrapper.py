@@ -715,3 +715,231 @@ class TestQueryRequestId:
             }
         )
         assert w.context.query(query="hello")["request_id"] == "from-data"
+
+
+class TestAclEnforcementSync:
+    def test_query_preserves_warning_and_request_id(self):
+        w = _wrapper_with_response(
+            {
+                "success": True,
+                "data": {"chunks": []},
+                "meta": {
+                    "request_id": "rid",
+                    "warnings": [{"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}],
+                },
+            }
+        )
+        result = w.context.query(query="hello", acl=["someone"])
+        assert result["request_id"] == "rid"
+        assert result["warnings"][0]["code"] == "acl_ignored_by_connector_enforcement"
+
+    def test_raw_envelope_preserves_warnings_and_request_id(self, monkeypatch, capsys):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = HydraDB(token="x", base_url="http://test.local", database="db_test")
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda *a, **kw: httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"sources": []},
+                    "meta": {"request_id": "raw-id", "warnings": [warning]},
+                },
+            ),
+        )
+        result = w.context.subgraph(id="source")
+        assert result == {"sources": [], "request_id": "raw-id", "warnings": [warning]}
+        assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err
+
+    def test_list_preserves_warning_when_flattening(self):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = _wrapper_with_response(
+            {"success": True, "data": {"inner": {"sources": []}}, "meta": {"warnings": [warning]}}
+        )
+        assert w.context.list()["warnings"] == [warning]
+
+    def test_list_payload_keeps_shape_and_warning_is_visible(self, capsys):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        result = _unwrap_payload({"success": True, "data": [1, 2], "meta": {"warnings": [{"code": "warning-code"}]}})
+        assert result == [1, 2]
+        assert "warning-code" in capsys.readouterr().err
+
+    def test_payload_warning_collision_preserves_envelope_warnings(self, capsys):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload warning"]},
+                "meta": {"warnings": [None, {"message": "missing-code"}, warning]},
+            }
+        )
+        assert result == {"warnings": ["payload warning"], "response_warnings": [warning]}
+        assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err
+
+    def test_existing_response_warning_field_is_not_replaced(self):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload"], "response_warnings": ["keep-me"]},
+                "meta": {"warnings": [warning]},
+            }
+        )
+        assert result == {
+            "warnings": ["payload"],
+            "response_warnings": ["keep-me", warning],
+        }
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"inner": {"sources": [], "warnings": ["payload"]}},
+            {"inner": {"sources": []}, "warnings": ["payload"]},
+        ],
+    )
+    def test_list_flattening_preserves_payload_and_envelope_warnings(self, payload):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = _wrapper_with_response({"success": True, "data": payload, "meta": {"warnings": [warning]}})
+        assert w.context.list() == {
+            "sources": [],
+            "warnings": ["payload"],
+            "response_warnings": [warning],
+        }
+
+
+def test_query_table_options_and_new_response_fields(monkeypatch):
+    captured = {}
+    payload = {
+        "chunks": [{"chunk_content": "hello", "chunk_metadata": {"page": 2}}],
+        "tabular_data": {"sql": "select 1"},
+        "temporal_facts": [{"observed_at": "2026-01-01T00:00:00Z"}],
+        "graph_context": {"query_paths": [{"source_id": "s", "read_status": "ready"}]},
+    }
+
+    def post(url, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": payload, "meta": {"warnings": [{"code": "partial", "collections": ["c"]}]}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db", collection="c")
+    result = w.context.query(query="q", include_table_sql=False, table_limit=3)
+    assert captured["json"]["include_table_sql"] is False
+    assert captured["json"]["table_limit"] == 3
+    for key, value in payload.items():
+        assert result[key] == value
+    assert result["warnings"][0]["collections"] == ["c"]
+
+
+def test_sdk_query_preserves_additive_response_fields():
+    payload = {
+        "chunks": [{"chunk_content": "hello", "chunk_metadata": {"page": 2}}],
+        "tabular_data": {"sql": "select 1"},
+        "temporal_facts": [{"observed_at": "2026-01-01T00:00:00Z"}],
+        "graph_context": {"query_paths": [{"source_id": "s", "read_status": "ready"}]},
+    }
+    w = _wrapper_with_response({"success": True, "data": payload, "meta": {}})
+    result = w.context.query(query="q")
+    for key, value in payload.items():
+        assert result[key] == value
+
+
+def test_sdk_relations_and_connector_preserve_provenance():
+    evidence = {"database": "db", "collection": "c", "source_id": "s", "read_status": "ready"}
+    relations = {"relations": [{"source": {"name": "a", **evidence}, "target": {"name": "b"}, "relations": [evidence]}]}
+    w = _wrapper_with_response({"success": True, "data": relations, "meta": {}})
+    result = w.context.relations(id="s")
+    assert result["relations"][0]["source"]["source_id"] == "s"
+    assert result["relations"][0]["relations"][0]["read_status"] == "ready"
+    w = _wrapper_with_response({"connector_id": "c1", "paused_reason": "quota"})
+    assert w.connectors.get("c1")["paused_reason"] == "quota"
+    w = _wrapper_with_response({"connectors": [{"connector_id": "c1", "paused_reason": "quota"}]})
+    assert w.connectors.list()[0]["paused_reason"] == "quota"
+
+
+@pytest.mark.parametrize("table_options", [{}, {"include_table_sql": False, "table_limit": 3}, {"titles": ["doc"]}])
+def test_query_retries_transient_http_failure(monkeypatch, table_options):
+    import hydra_db.core.http_client as sdk_http
+
+    monkeypatch.setattr(sdk_http.time, "sleep", lambda _: None)
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, json={"error": "temporary"})
+        return httpx.Response(200, json={"success": True, "data": {"chunks": []}, "meta": {}})
+
+    w = HydraDB(token="x", base_url="http://test.local", database="db", collection="c")
+    w._sdk = _SdkHydraDB(
+        token="x", base_url="http://test.local", httpx_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    monkeypatch.setattr(httpx, "post", lambda url, **kwargs: handler(httpx.Request("POST", url, json=kwargs["json"])))
+    assert w.context.query(query="q", **table_options)["chunks"] == []
+    assert len(requests) == 2
+    assert json.loads(requests[0].content) == json.loads(requests[1].content)
+
+
+def test_raw_mutations_do_not_retry(monkeypatch):
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(503, json={"error": "temporary"})
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db")
+    with pytest.raises(HydraDBClientError):
+        w._raw_post("/feedback", json_body={"feedback": "x"})
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status,expected_attempts", [(400, 1), (408, 3), (409, 3), (429, 3), (503, 3)])
+def test_raw_query_retry_status_and_exhaustion(monkeypatch, status, expected_attempts):
+    import hydradb_cli.hydra.client as client
+
+    monkeypatch.setattr(client.time, "sleep", lambda _: None)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(url)
+        return httpx.Response(status, json={"error": "failure"})
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db")
+    with pytest.raises(HydraDBClientError) as error:
+        w.context.query(query="q", table_limit=1)
+    assert error.value.status_code == status
+    assert len(calls) == expected_attempts
+
+
+def test_raw_query_retries_connect_error_and_honors_retry_after(monkeypatch):
+    import hydradb_cli.hydra.client as client
+
+    delays = []
+    monkeypatch.setattr(client.time, "sleep", delays.append)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectError("temporary")
+        if len(calls) == 2:
+            return httpx.Response(429, headers={"retry-after": "3"})
+        return httpx.Response(200, json={"success": True, "data": {"chunks": []}, "meta": {}})
+
+    monkeypatch.setattr(httpx, "post", post)
+    w = HydraDB(token="x", base_url="http://test.local", database="db")
+    assert w.context.query(query="q", include_table_sql=True)["chunks"] == []
+    assert len(calls) == 3
+    assert 0.9 <= delays[0] <= 1.1
+    assert delays[1] == 3

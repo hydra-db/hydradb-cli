@@ -1218,3 +1218,15 @@ class TestFeedbackCommand:
         assert "feedback needs something to record" in result.output
         assert "Connection error" not in result.output
         w.feedback.submit.assert_not_called()
+
+
+def test_query_table_options_and_table_only_human_output():
+    _auth()
+    w = _wrapper(**{"context.query": {"chunks": [], "tabular_data": {"sql": "select 1"}}})
+    with _patch_wrapper(w):
+        result = runner.invoke(app, ["query", "q", "--include-table-sql", "--table-limit", "3"])
+    assert result.exit_code == 0
+    assert w.context.query.call_args.kwargs["include_table_sql"] is True
+    assert w.context.query.call_args.kwargs["table_limit"] == 3
+    assert "select 1" in result.output
+    assert "No relevant results" not in result.output
