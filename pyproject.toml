@@ -45,7 +45,7 @@ hydradb = "hydradb_cli.main:app"
 [project.urls]
 Homepage = "https://hydradb.com/"
 Documentation = "https://docs.hydradb.com/"
-Repository = "https://github.com/usecortex/hydradb-cli"
+Repository = "https://github.com/hydra-db/hydradb-cli"
 
 [project.optional-dependencies]
 dev = [
