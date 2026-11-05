@@ -11,8 +11,10 @@ from hydradb_cli.output import print_error, warn_deprecated
 
 def mask_api_key(key: str) -> str:
     """Mask an API key for display, showing only prefix and suffix."""
-    if len(key) > 12:
+    if len(key) >= 24:
         return f"{key[:8]}...{key[-4:]}"
+    if len(key) >= 16:
+        return f"{key[:4]}...{key[-4:]}"
     return "***"
 
 
