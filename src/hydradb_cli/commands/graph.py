@@ -357,13 +357,23 @@ def load(
     # The node id comes from --key. A separate `id` field in the file is not
     # loaded, so say so when it disagrees with the key.
     if key != "id":
-        differs = [i for i, row in enumerate(rows) if "id" in row and row["id"] != row[key]]
+        # type() as well as value: in Python True == 1, but they are different ids.
+        differs = [
+            i
+            for i, row in enumerate(rows)
+            if "id" in row and (type(row["id"]) is not type(row[key]) or row["id"] != row[key])
+        ]
         if differs:
             shown = ", ".join(str(i) for i in differs[:5])
-            print_warning(
+            message = (
                 f"Row index {shown}{' ...' if len(differs) > 5 else ''}: the 'id' field differs from "
                 f"'{key}'. The node id is the '{key}' value. The 'id' field is not loaded."
             )
+            if get_output_format() == "json":
+                # JSON mode keeps stdout for the result; the warning goes to stderr.
+                typer.echo(f"warning: {message}", err=True)
+            else:
+                print_warning(message)
 
     # Every property name is written into the query text, so each one must be
     # a bare identifier, like the label and the key.

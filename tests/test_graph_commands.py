@@ -419,6 +419,30 @@ def test_load_warns_when_an_id_field_differs_from_the_key(tmp_path):
     )
 
 
+def test_load_warns_on_stderr_in_json_mode(tmp_path):
+    """--output json keeps the warning: it goes to stderr, stdout stays the result."""
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps([{"ext_id": 1, "id": 99, "name": "A"}]))
+    w = _wrapper()
+    with _patch(w):
+        result = CliRunner().invoke(
+            app, ["--output", "json", "graph", "load", str(path), "--label", "Person", "--key", "ext_id"], env=_WIDE
+        )
+
+    assert result.exit_code == 0
+    assert "'id' field differs" in result.stderr
+    assert "differs" not in result.stdout
+
+
+def test_load_warns_when_a_boolean_id_equals_the_key_numerically(tmp_path):
+    """True == 1 in Python, but a boolean id is not the integer key."""
+    result, _ = _load(tmp_path, [{"ext_id": 1, "id": True, "name": "A"}])
+
+    assert result.exit_code == 0
+    assert "'id' field differs" in _text(result)
+
+
 def test_load_does_not_warn_when_the_id_field_matches_the_key(tmp_path):
     result, w = _load(tmp_path, [{"ext_id": 1, "id": 1}, {"ext_id": 2, "id": 2}])
 
