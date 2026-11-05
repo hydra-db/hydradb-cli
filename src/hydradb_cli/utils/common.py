@@ -152,20 +152,24 @@ def require_non_empty(value: str | None, name: str) -> str:
 
 
 def read_stdin_safe() -> str | None:
-    """Read from stdin if data is available, without hanging.
+    """Read piped stdin to completion, or None when stdin is a terminal.
 
-    Returns the stripped content or None if nothing is available.
+    Returns the stripped content, or None when stdin is an interactive terminal
+    or carries nothing.
+
+    A non-tty stdin is always a redirect — a pipe, a file, or a closed handle —
+    so it is guaranteed to reach EOF and is read in full. Polling for readiness
+    first would silently discard the user's input instead: ``select`` rejects
+    non-socket handles on Windows, and any short timeout races a producer that
+    takes longer than that to write (``curl … | hydradb ingest``).
     """
-    if sys.stdin.isatty():
+    stream = sys.stdin
+    if stream is None:
         return None
-
-    import select
-
     try:
-        ready, _, _ = select.select([sys.stdin], [], [], 0.1)
-        if ready:
-            data = sys.stdin.read().strip()
-            return data if data else None
+        if stream.isatty():
+            return None
+        data = stream.read()
     except (OSError, ValueError):
-        pass
-    return None
+        return None
+    return data.strip() or None
