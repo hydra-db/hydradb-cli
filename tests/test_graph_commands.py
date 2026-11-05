@@ -314,7 +314,7 @@ def test_collection_delete_requires_confirmation():
 
 def test_load_chunks_and_merges(tmp_path):
     _auth()
-    rows = [{"ext_id": str(i), "name": f"U{i}"} for i in range(250)]
+    rows = [{"ext_id": i, "name": f"U{i}"} for i in range(250)]
     path = tmp_path / "rows.json"
     path.write_text(json.dumps(rows))
 
@@ -328,8 +328,42 @@ def test_load_chunks_and_merges(tmp_path):
 
     assert result.exit_code == 0
     assert w.graph.query.call_count == 3  # 100 + 100 + 50
-    # MERGE on a caller-owned key, so a load that fails part-way is re-runnable.
-    assert "MERGE (n:Person {ext_id: row.ext_id})" in w.graph.query.call_args.kwargs["query"]
+    # MERGE on the integer id with no label, then SET one label and each
+    # property: the only node upsert shape HydraDB accepts. Re-runnable.
+    assert w.graph.query.call_args.kwargs["query"] == (
+        "UNWIND $rows AS row MERGE (n {id: row.ext_id}) SET n:Person, n.ext_id = row.ext_id, n.name = row.name"
+    )
+
+
+@pytest.mark.parametrize("value", ["7", 7.5, True, None])
+def test_load_rejects_a_merge_key_that_is_not_an_integer(tmp_path, value):
+    """HydraDB graph nodes use integer ids, so a string key fails server-side."""
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps([{"ext_id": 1}, {"ext_id": value}]))
+
+    w = _wrapper()
+    with _patch(w):
+        result = runner.invoke(app, ["graph", "load", str(path), "--label", "Person", "--key", "ext_id"], env=_WIDE)
+
+    assert result.exit_code == 1
+    assert "must be an integer" in _text(result)
+    w.graph.query.assert_not_called()
+
+
+def test_load_rejects_a_property_name_that_is_not_an_identifier(tmp_path):
+    """Property names are written into the query text, like the label."""
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps([{"ext_id": 1, "first-name": "A"}]))
+
+    w = _wrapper()
+    with _patch(w):
+        result = runner.invoke(app, ["graph", "load", str(path), "--label", "Person", "--key", "ext_id"], env=_WIDE)
+
+    assert result.exit_code == 1
+    assert "first-name" in _text(result)
+    w.graph.query.assert_not_called()
 
 
 def test_load_rejects_rows_missing_the_merge_key(tmp_path):
@@ -429,7 +463,7 @@ def test_load_rejects_an_unsafe_label(tmp_path):
 def test_load_refuses_oversized_batches_before_sending_any(tmp_path):
     """An all-or-nothing check: a load must not half-apply then fail."""
     _auth()
-    rows = [{"ext_id": str(i), "pad": "x" * 500} for i in range(2000)]
+    rows = [{"ext_id": i, "pad": "x" * 500} for i in range(2000)]
     path = tmp_path / "rows.json"
     path.write_text(json.dumps(rows))
 
@@ -442,7 +476,7 @@ def test_load_refuses_oversized_batches_before_sending_any(tmp_path):
         )
 
     assert result.exit_code == 1
-    assert "Nothing was loaded" in _text(result)
+    assert "request cap" in _text(result)
     w.graph.query.assert_not_called()
 
 

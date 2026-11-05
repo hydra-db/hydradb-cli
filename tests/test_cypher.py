@@ -69,6 +69,19 @@ def test_scalars_render_as_themselves(value, expected):
     assert render_value(value) == expected
 
 
+def test_a_node_returned_as_an_integer_id_renders_as_the_id():
+    """HydraDB answers `RETURN n` with the node's integer id, not a node object.
+
+    The renderer must pass the id through, in a cell and inside a path, and not
+    fail on a value that is not a dict.
+    """
+    assert render_value(7) == "7"
+    headers, cells = rows_to_table([{"n": 7, "name": "Alice"}])
+    assert headers == ["n", "name"]
+    assert cells == [["7", "Alice"]]
+    assert render_value({"nodes": [1, 2], "edges": [3]}) == "1-[:?]->2"
+
+
 def test_rows_to_table_covers_every_column():
     """Rows of differing shape must not silently lose a column."""
     headers, cells = rows_to_table([{"a": 1}, {"b": 2}])
