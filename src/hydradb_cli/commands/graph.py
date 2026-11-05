@@ -1,4 +1,4 @@
-"""Graph (BYOG) commands — full Cypher over graph collections you own.
+"""Graph (BYOG) commands — Cypher over graph collections you own.
 
 ``hydradb graph query|collections|load``, plus ``graph database`` and
 ``graph collection`` for lifecycle management.
@@ -12,6 +12,7 @@ memories. See https://docs.hydradb.com/essentials/v2/graph-collections-byog
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,9 @@ from hydradb_cli.utils.common import get_wrapper, handle_api_error
 
 app = typer.Typer(
     help=(
-        "[bold]Graph[/bold] (BYOG) — full Cypher over graph collections you own.\n\n"
+        "[bold]Graph[/bold] (BYOG) — Cypher over graph collections you own.\n\n"
+        "Nodes use integer ids, and writes use a small set of Cypher shapes. "
+        "See 'hydradb graph query --help'.\n\n"
         "A separate store from memories and knowledge: 'hydradb query' cannot see graph "
         "data, and 'hydradb graph query' cannot see memories."
     ),
@@ -152,10 +155,19 @@ def query(
     Pass user data through --param rather than building it into the query
     string: parameters are bound safely and keep query plans cacheable.
 
-    Your query is sent verbatim. HydraDB rejects procedure calls (CALL db.*,
-    CALL apoc.*) and LOAD CSV before executing anything, so a rejected query
-    changes nothing and the server explains why. Note that EXPLAIN and PROFILE
-    EXECUTE the query rather than planning it.
+    Your query is sent verbatim. The server refuses a query it does not
+    support with a 400 error, before it changes anything.
+
+    Writes: every node needs an integer id property. Use one-hop edge
+    patterns, such as CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2}).
+    Upsert nodes with UNWIND $rows AS row MERGE (n {id: row.id})
+    SET n:Person, n.name = row.name (one label, set with SET). A node without
+    an edge, string ids, CREATE ... RETURN, SET n = $map, SET n += $map,
+    FOREACH and CREATE INDEX are refused.
+
+    Reads: type(), id(), labels(), keys(), properties(), shortestPath and
+    untyped relationships such as (a)--(b) are refused. RETURN n gives the
+    node's integer id, so return properties (n.name) instead.
     """
     _validate_collection(collection)
 
@@ -198,8 +210,8 @@ def collections(
 ) -> None:
     """List the graph collections in a graph database.
 
-    Each collection is an independent graph. Collections auto-create on their
-    first write, so a name missing here has simply never been written to.
+    Each collection is an independent graph. A collection is created by its
+    first write, so a name missing here has never been written to.
     """
     wrapper = get_wrapper()
     names = _execute("Listing collections...", lambda: wrapper.graph.collections(database=database))
@@ -218,11 +230,30 @@ def collections(
     console.print(make_table("Collection", rows=[[name] for name in names]))
 
 
+def _unsupported_value(value: Any) -> str:
+    """Describe a row value the server refuses in a batch, or return ''."""
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, dict):
+        return "a JSON object"
+    if isinstance(value, (bool, str)):
+        return ""
+    if isinstance(value, int):
+        return "" if -(2**63) <= value < 2**63 else "an integer outside the 64-bit range"
+    if isinstance(value, float):
+        return "" if math.isfinite(value) else "not a finite number"
+    return f"of type {type(value).__name__}"
+
+
 @app.command(name="load")
 def load(
     file: Path = typer.Argument(help="JSON file: an array of row objects."),
-    label: str = typer.Option(..., "--label", "-l", help="Node label to MERGE, e.g. Person."),
-    key: str = typer.Option(..., "--key", "-k", help="Property to MERGE on. Must be unique per row."),
+    label: str = typer.Option(..., "--label", "-l", help="Node label to set, e.g. Person. One label per node."),
+    key: str = typer.Option(
+        ..., "--key", "-k", help="Integer property that becomes the node id. Must be unique per row."
+    ),
     chunk: int = typer.Option(500, "--chunk", min=1, help="Rows per request."),
     database: str | None = typer.Option(None, "--database", "-d", help="Graph database. Uses the default if unset."),
     collection: str | None = typer.Option(None, "--collection", "-c", help="Graph collection."),
@@ -230,9 +261,13 @@ def load(
     """Bulk-load rows from a JSON file into a graph collection.
 
     Chunks the file into batches that fit inside the 256 KiB request cap and
-    the 30s write budget, and MERGEs on a key you own so a load that fails
-    part-way is safe to re-run — a bare CREATE would duplicate every row in an
-    already-applied chunk.
+    the 30s write budget. Each row becomes one node. The --key value must be a
+    non-negative integer: it becomes the node id. The load MERGEs on that id,
+    so you can run a load again after it fails part-way.
+
+    Every row must have the same fields, and every value must be a string,
+    boolean, integer or finite number (not null, a list or an object). The
+    command checks the whole file before it sends a row.
     """
     _validate_collection(collection)
 
@@ -273,8 +308,89 @@ def load(
             "underscores only, starting with a letter or underscore."
         )
 
+    # HydraDB stores graph nodes by a non-negative integer id. Booleans are
+    # ints in Python, so exclude them by name.
+    not_id = [
+        i for i, row in enumerate(rows) if isinstance(row[key], bool) or not isinstance(row[key], int) or row[key] < 0
+    ]
+    if not_id:
+        shown = ", ".join(str(i) for i in not_id[:5])
+        print_error(
+            f"The merge key '{key}' must be a non-negative integer in every row. HydraDB graph "
+            f"nodes use integer ids. Bad value at row index: {shown}{' ...' if len(not_id) > 5 else ''}. "
+            "Nothing was loaded."
+        )
+
+    # The server refuses a batch whose rows do not all have the same fields:
+    # every property in the query reads a field from every row.
+    expected = set(rows[0])
+    for i, row in enumerate(rows):
+        if set(row) != expected:
+            missing_fields = sorted(expected - set(row))
+            extra_fields = sorted(set(row) - expected)
+            detail = "; ".join(
+                part
+                for part in (
+                    f"missing {', '.join(missing_fields)}" if missing_fields else "",
+                    f"extra {', '.join(extra_fields)}" if extra_fields else "",
+                )
+                if part
+            )
+            print_error(
+                f"Row index {i} does not have the same fields as row index 0 ({detail}). "
+                "Every row must have the same fields. Add the missing fields to each row, or "
+                "split the file into one file per set of fields. Nothing was loaded."
+            )
+
+    # The server accepts only string, boolean, 64-bit integer and finite float
+    # values in a batch row. It refuses null, a list and an object.
+    for i, row in enumerate(rows):
+        for name, value in row.items():
+            problem = _unsupported_value(value)
+            if problem:
+                print_error(
+                    f"Row index {i}, field '{name}': the value is {problem}. A graph property must be "
+                    "a string, boolean, integer or finite number. Flatten a list or object, or store it "
+                    "as a JSON string. Leave out a null field from every row. Nothing was loaded."
+                )
+
+    # The node id comes from --key. A separate `id` field in the file is not
+    # loaded, so say so when it disagrees with the key.
+    if key != "id":
+        # type() as well as value: in Python True == 1, but they are different ids.
+        differs = [
+            i
+            for i, row in enumerate(rows)
+            if "id" in row and (type(row["id"]) is not type(row[key]) or row["id"] != row[key])
+        ]
+        if differs:
+            shown = ", ".join(str(i) for i in differs[:5])
+            message = (
+                f"Row index {shown}{' ...' if len(differs) > 5 else ''}: the 'id' field differs from "
+                f"'{key}'. The node id is the '{key}' value. The 'id' field is not loaded."
+            )
+            if get_output_format() == "json":
+                # JSON mode keeps stdout for the result; the warning goes to stderr.
+                typer.echo(f"warning: {message}", err=True)
+            else:
+                print_warning(message)
+
+    # Every property name is written into the query text, so each one must be
+    # a bare identifier, like the label and the key.
+    properties: list[str] = [name for name in rows[0] if name != "id"]
+    bad = [name for name in properties if not CYPHER_IDENTIFIER.match(name)]
+    if bad:
+        print_error(
+            f"Invalid property name(s): {', '.join(bad[:5])}. A Cypher property name must be "
+            "letters, digits and underscores only, starting with a letter or underscore. Nothing was loaded."
+        )
+
     wrapper = get_wrapper()
-    cypher = f"UNWIND $rows AS row MERGE (n:{label} {{{key}: row.{key}}}) SET n += row"
+    # The node upsert shape HydraDB accepts: MERGE on the integer id with no
+    # label, then set exactly one label and each property by name. HydraDB
+    # refuses a label inside MERGE and `SET n += row`.
+    assignments = "".join(f", n.{name} = row.{name}" for name in properties)
+    cypher = f"UNWIND $rows AS row MERGE (n {{id: row.{key}}}) SET n:{label}{assignments}"
 
     batches = [rows[i : i + chunk] for i in range(0, len(rows), chunk)]
     oversized = [
@@ -369,7 +485,13 @@ def collection_delete(
     database: str | None = typer.Option(None, "--database", "-d", help="Graph database. Uses the default if unset."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Drop one graph collection and all its data. Irreversible, and idempotent."""
+    """Drop one graph collection and all its data. Irreversible.
+
+    The collection leaves the list when the delete succeeds. A very large
+    collection can need a retry: the command fails, and the next run continues
+    where it stopped. The storage is retained. Do not write to the collection
+    while the delete runs: a write at the same time can survive the delete.
+    """
     _validate_collection(collection)
     if not yes:
         typer.confirm(f"Drop graph collection '{collection}' and all its data? This cannot be undone.", abort=True)

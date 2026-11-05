@@ -370,7 +370,7 @@ hydradb database delete old-database --yes
 
 ### graph (Cypher / BYOG)
 
-Full **Cypher** over graph collections you own end to end — HydraDB's graph database offering ([docs](https://docs.hydradb.com/essentials/v2/graph-collections-byog)).
+**Cypher** over graph collections you own end to end — HydraDB's graph database offering ([docs](https://docs.hydradb.com/essentials/v2/graph-collections-byog)).
 
 This is a **separate store** from memories and knowledge, and nothing crosses between them: `hydradb query` cannot see graph data, and `hydradb graph query` cannot see memories. Each collection is an independent graph; a query sees exactly one and never another's data.
 
@@ -378,52 +378,96 @@ This is a **separate store** from memories and knowledge, and nothing crosses be
 |---------|--------------|-------------|
 | `graph query <cypher>` | Runs Cypher against one collection | `--param k=v`, `--params-json`, `--database`, `--collection` |
 | `graph collections` | Lists the graphs in a graph database | `--database` |
-| `graph load <file.json>` | Chunked, re-runnable bulk import | `--label`, `--key`, `--chunk` |
+| `graph load <file.json>` | Chunked, re-runnable bulk import of nodes | `--label`, `--key`, `--chunk` |
 | `graph database create <name>` | Creates a graph database (ready immediately) | — |
 | `graph database delete <name>` | Drops a database and every collection in it | `--yes` / `-y` |
 | `graph collection delete <name>` | Drops one collection and its data | `--database`, `--yes` / `-y` |
 
 ```bash
+# Write: an edge between two nodes with integer ids
+hydradb graph query "MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})"
+
 # Read
 hydradb graph query "MATCH (p:Person) RETURN p.name AS name ORDER BY name"
 
 # Parameters — always prefer these over string-building
-hydradb graph query "MATCH (p:Person {name: \$n})-[:KNOWS*1..3]->(f) RETURN DISTINCT f.name AS name" \
+hydradb graph query "MATCH (p:Person {name: \$n})-[:KNOWS*1..3]->(f:Person) RETURN DISTINCT f.name AS name" \
   --param n=Alice
 
-# What is actually in here? There is no schema command — ask the graph itself.
-hydradb graph query "MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l"
-
-# Bulk import: chunked to fit the request cap, MERGEd so a re-run is safe
+# Bulk import: --key must hold an integer. It becomes the node id.
 hydradb graph load people.json --label Person --key ext_id
 
 # JSON out — the rows verbatim, so jq works directly
 hydradb graph query "MATCH (p:Person) RETURN p.name AS name" --output json | jq '.[].name'
 ```
 
-Collections **auto-create on first write**, so there is no create-collection command.
+A collection is created by its first write, so there is no create-collection command.
+
+**Supported Cypher.** HydraDB supports a subset of openCypher. The server refuses
+other queries with a 400 error before it changes anything.
+
+Writes:
+
+- Every node has an integer `id` property. String ids are refused.
+- Create or merge edges as one-hop patterns:
+  `CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})` or
+  `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})`.
+- Upsert nodes in a batch. Use exactly one label, and set it with `SET`:
+  `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`.
+- Create edges in a batch, with no labels or properties in the pattern:
+  `UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`. A re-run of
+  the same batch does not add edges. A single `CREATE` of an edge adds a new edge each
+  time it runs.
+- Update by id: `MATCH (n:Person {id: 1}) SET n.age = 31`.
+- Delete: `MATCH (n:Person) DETACH DELETE n`, `DELETE r` on a typed relationship, or many
+  nodes with `UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n` and
+  `{"rows": [{"id": 4}]}`.
+- An edge to an `id` that does not exist creates a node with that `id` and no label.
+  Load nodes before their edges.
+- If you write an existing `id` with a second label, the node gets both labels.
+- Refused: a node without an edge (`CREATE (:Person {name: 'a'})`), `CREATE ... RETURN ...`,
+  `MATCH (a), (b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`,
+  writes inside `CALL { ... }`, `UNWIND $ids AS id MATCH (n {id: id}) ...` (send row maps
+  instead), and `CREATE INDEX`.
+
+Reads:
+
+- Supported: `MATCH` with labels and properties, typed traversal (also bounded
+  variable-length, `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `WITH`,
+  `ORDER BY` / `SKIP` / `LIMIT`, `count` / `sum` / `avg` / `collect` / `min` / `max`, `CASE`,
+  `EXISTS { ... }`, string functions, parameters, map and list literals, and read-only
+  `CALL { ... }` subqueries.
+- Refused: `type()`, `id()`, `labels()`, `keys()`, `properties()`, `nodes()`,
+  `relationships()`, `startNode()`, `endNode()`, `elementId()`, `shortestPath`, and
+  untyped relationship patterns such as `(a)--(b)` or `()-[r]->()`.
+- A read that starts with `UNWIND` has one shape only: one `UNWIND` over a list of plain
+  values (not maps), one `MATCH` and a final `RETURN`, such as
+  `UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name`. It cannot have
+  `WHERE`, `WITH`, `OPTIONAL MATCH`, `ORDER BY`, `SKIP`, `LIMIT` or `UNION`.
+- `RETURN n` gives the node's integer id, not a node object. Return properties
+  (`n.name`) instead.
+
+There is no schema command. To see what a collection holds, query the labels you wrote,
+for example `MATCH (n:Person) RETURN count(n)`.
+
+**Deletes.** A collection leaves the list when its delete succeeds. A very large
+collection can need a retry: the command fails, and the next run continues where it
+stopped. The storage is retained. Do not write to a collection while you delete it: a write at the same time
+can survive the delete.
 
 **The CLI does not inspect your Cypher.** There is no `--read-only` flag and no local
-pre-rejection of unsupported constructs: both would mean classifying Cypher text
-client-side, a heuristic that can only agree with the server or be wrong — and being
-wrong means refusing a query HydraDB would have run. Your query is sent verbatim and
-the server rules on it.
+pre-rejection of unsupported constructs. Your query is sent verbatim and the server
+rules on it.
 
-The request cap and the `graph load` label/merge-key rules *are* checked locally,
-because those are transport and string-building facts the client owns rather than
-rules about what Cypher means.
-
-**Differences from Neo4j.** Each of these is rejected *before* execution, so a rejected
-query changes nothing and fails identically on retry:
-
-- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected **by the server**, before it executes anything — `CALL { ... }` subqueries are fine. There is no schema command and no `apoc.meta.schema()`; discover a collection's structure by querying it, as above.
-- `LOAD CSV` is rejected — pass rows through parameters, or use `graph load`.
-- Existence checks are bare pattern predicates (`WHERE (p)-[:KNOWS]->()`); `EXISTS { ... }` and `exists()` are not accepted.
-- `shortestPath` belongs in `RETURN`/`WITH`, not `MATCH p = ...`, and must be directed.
-- `EXPLAIN` / `PROFILE` **execute** the query rather than planning it.
+The request cap and the `graph load` rules *are* checked locally: the label, the key and
+every property name must be identifiers, every `--key` value must be a non-negative
+integer, every row must have the same fields, and every value must be a string, boolean,
+integer or finite number (not null, a list or an object). A row whose `id` field differs from `--key` gets a warning: the node id
+is the `--key` value.
 
 Requests are capped at 256 KiB (enforced locally, before upload) and large result sets
 are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.
+
 ### connectors
 
 Managed integrations that sync external sources — Slack, GitHub, Notion, Jira, Google Drive, Gmail, HubSpot and [many more](https://docs.hydradb.com/essentials/v2/connectors) — into a HydraDB database. Once synced, the data is reachable through the ordinary `hydradb query`.

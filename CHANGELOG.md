@@ -30,6 +30,14 @@
 
 - **`HYDRADB_GRAPH_COLLECTION`** sets the default graph collection (default `default`). It deliberately does not fall back to `HYDRADB_COLLECTION`: a context collection names a memory/knowledge partition and means nothing to a graph, so inheriting it would silently point Cypher at a collection you never chose.
 
+### Changed
+
+- **`hydradb graph` now documents the Cypher that HydraDB graph collections support (ENG-3448).** Graph collections now run on a graph engine that supports a subset of openCypher. Nodes use integer `id` properties. Writes are one-hop edge patterns or a batched node upsert (`UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`). `type()`, `id()`, `labels()`, `keys()`, `properties()`, `shortestPath` and untyped relationships are refused, and `RETURN n` gives the node's integer id. The README and `graph query --help` list the supported and refused shapes. The README no longer suggests `labels(n)` to see what a collection holds.
+
+  `graph load` now builds the supported upsert shape: `MERGE (n {id: row.<key>}) SET n:<Label>, n.<prop> = row.<prop>, ...`. The old `MERGE (n:<Label> {<key>: row.<key>}) SET n += row` is refused by the server. The `--key` value must be a non-negative integer in every row (it becomes the node id), every property name must be an identifier, every row must have the same fields, and every value must be a string, boolean, integer or finite number (not null, a list or an object). All are checked before anything is sent, and the error names the row. A row whose `id` field differs from `--key` gets a warning.
+
+  The table renderer already shows a node returned as an integer id as that number. A test now pins this. The node, relationship and path rendering tests are now marked as defensive: the engine does not return those shapes.
+
 ### Internal
 
 - `HydraDB.graph` is a hand-rolled `httpx` path rather than an SDK call: the pinned `hydradb-sdk==2.1.2` exposes `context`, `databases`, `connectors` and `webhooks` and has no `byog` resource, so those endpoints are unreachable through it. It reuses the wrapper's existing envelope unwrapping and error translation and raises the same `HydraDBClientError`, so `handle_api_error` treats a BYOG failure exactly like an SDK one. When the SDK grows a `byog` resource, that one class is reimplemented over it and no caller changes. The exact SDK pin (CONTRACT S2 rule 1) is unaffected — there is no generated name to be insulated from yet.
