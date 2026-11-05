@@ -60,6 +60,15 @@
       }
     },
     {
+      "id": "ingest-unified-json",
+      "$comment": "PRO-1618. On a UNIFIED database (GET /databases details[].type == \"unified\") ingest is an application/json body whose `context` list carries items of exactly one `text` or one `conversation` each, in the contract's field names (context_id, title, enrich, upsert, instructions, happened_at, attributes, custom_attributes, context_category, forceful_relations, acl). `type` MUST NOT be sent, and neither may any split-era field (documents, app_knowledge, memories, items). The multipart vectors above are unchanged for split databases: a client branches on the database's layout, never on a request flag. `layout` in `args` tells the runner which database the call is aimed at.",
+      "call": { "op": "ingest", "args": { "layout": "unified", "text": "quarterly report body", "title": "Q3", "id": "src_client_assigned" } },
+      "expect": {
+        "wrapper_method": "context.ingestContext",
+        "sdk": { "method": "raw", "content_type": "application/json", "args_include": { "database": "db_test", "context": [ { "context_id": "src_client_assigned", "title": "Q3", "text": "quarterly report body" } ] }, "args_scope": { "database": "db_test", "collection": "col_test" }, "forbid_content_type": "multipart/form-data", "forbid_field": "type", "source_field_in": ["context"] }
+      }
+    },
+    {
       "id": "list-memory",
       "call": { "op": "list", "args": { "kind": "memory" } },
       "expect": {
