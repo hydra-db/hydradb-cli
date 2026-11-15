@@ -33,6 +33,8 @@ console = Console(theme=_THEME, highlight=False)
 err_console = Console(stderr=True, theme=_THEME, highlight=False)
 
 _output_format: str = "human"
+_scope_notice: dict[str, Any] | None = None
+_scope_emitted = False
 
 BRAND = "[bold cyan]///[/bold cyan]"
 
@@ -41,8 +43,29 @@ _warned_deprecations: set[str] = set()
 
 
 def set_output_format(fmt: str) -> None:
-    global _output_format
+    global _output_format, _scope_notice, _scope_emitted
     _output_format = fmt
+    _scope_notice = None
+    _scope_emitted = False
+
+
+def set_scope_notice(database: str, collection: str | None, *, database_source: str, collection_source: str) -> None:
+    """Record resolved context scope without inventing an omitted collection."""
+    global _scope_notice
+    _scope_notice = {
+        "database": database,
+        "collection": collection,
+        "database_source": database_source,
+        "collection_source": collection_source,
+    }
+
+
+def emit_scope_notice() -> None:
+    """Keep human output and piped LLM prompts aware of their effective scope."""
+    global _scope_emitted
+    if _scope_notice is not None and not _scope_emitted:
+        err_console.print("scope: " + json.dumps(_scope_notice, ensure_ascii=False), markup=False)
+        _scope_emitted = True
 
 
 def warn_deprecated(old: str, new: str) -> None:
@@ -74,6 +97,8 @@ def spinner(message: str):
 
 def print_json(data: Any) -> None:
     """Print data as formatted JSON to stdout."""
+    if _scope_notice is not None and isinstance(data, dict):
+        data = {**data, "scope": dict(_scope_notice)}
     typer.echo(json.dumps(data, indent=2, default=str))
 
 
@@ -110,6 +135,7 @@ def print_result(
     if _output_format == "json":
         print_json(data)
     elif human_formatter:
+        emit_scope_notice()
         console.print(human_formatter(data))
     else:
         print_json(data)

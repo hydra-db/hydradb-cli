@@ -100,7 +100,7 @@ def _run(argv, envelope, monkeypatch):
     with patch("hydradb_cli.commands._impl.get_wrapper", return_value=_wrapper_returning(envelope)):
         result = runner.invoke(app, ["--output", "json", *argv])
     assert result.exit_code == 0, result.output
-    return json.loads(result.output)
+    return json.loads(result.stdout)
 
 
 @pytest.mark.parametrize("key", list(CASES))
@@ -115,6 +115,16 @@ def test_json_shape_matches_golden(key, monkeypatch, tmp_path):
         golden_path.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
 
     expected = json.loads(golden_path.read_text())
+    if key != "database_readiness":
+        expected = {
+            **expected,
+            "scope": {
+                "database": "db_test",
+                "collection": "col_test",
+                "database_source": "default",
+                "collection_source": "default",
+            },
+        }
     assert output == expected
 
 

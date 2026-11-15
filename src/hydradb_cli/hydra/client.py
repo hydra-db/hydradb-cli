@@ -16,7 +16,11 @@ Responsibilities (CONTRACT §2):
 
 from __future__ import annotations
 
+import email.utils
+import inspect
 import json
+import random
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -53,6 +57,76 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
+def _merge_warning_field(target: dict[str, Any], key: str, value: Any) -> None:
+    """Copy a payload warning field without replacing an existing value."""
+    if key not in target:
+        target[key] = value
+        return
+    existing = target.get("response_warnings", [])
+    existing_items = existing if isinstance(existing, list) else [existing]
+    value_items = value if isinstance(value, list) else [value]
+    target["response_warnings"] = [*existing_items, *value_items]
+
+
+def _with_warnings(data: Any, meta: Any) -> Any:
+    """Preserve envelope warnings using the compatibility bridge from PR #41."""
+    from hydradb_cli.output import err_console
+
+    meta = _dump(meta)
+    raw_warnings = meta.get("warnings") if isinstance(meta, dict) else None
+    if not isinstance(raw_warnings, list):
+        return data
+    warnings = []
+    for warning in raw_warnings:
+        warning = _dump(warning)
+        if (
+            isinstance(warning, dict)
+            and isinstance(warning.get("code"), str)
+            and warning["code"]
+            and (warning.get("message") is None or isinstance(warning["message"], str))
+        ):
+            warnings.append(warning)
+    if not warnings:
+        return data
+    for warning in warnings:
+        err_console.print("warning: " + json.dumps(warning, ensure_ascii=False), markup=False)
+    if isinstance(data, dict):
+        result = dict(data)
+        _merge_warning_field(result, "warnings", warnings)
+        return result
+    return data
+
+
+def _query_controls(
+    *,
+    query_explicit_relations: bool | None = None,
+    follow_forceful_relations: bool | None = None,
+    query_forceful_relations: bool | None = None,
+    additional_graph_context: str | None = None,
+    additional_context: str | None = None,
+    context: str | None = None,
+) -> dict[str, Any]:
+    """Select aliases by presence, keeping false and empty-string overrides."""
+    controls: dict[str, Any] = {}
+    for key, value in (
+        ("query_explicit_relations", query_explicit_relations),
+        ("follow_forceful_relations", follow_forceful_relations),
+        ("query_forceful_relations", query_forceful_relations),
+    ):
+        if value is not None:
+            controls[key] = value
+            break
+    for key, value in (
+        ("additional_graph_context", additional_graph_context),
+        ("additional_context", additional_context),
+        ("additional_context", context),
+    ):
+        if value is not None:
+            controls[key] = value
+            break
+    return controls
+
+
 def _unwrap(obj: Any) -> Any:
     """Return the plain-dict payload for an SDK response.
 
@@ -61,7 +135,7 @@ def _unwrap(obj: Any) -> Any:
     """
     if _is_envelope(obj):
         data = _dump(obj.data)
-        return data if data is not None else {}
+        return _with_warnings(data if data is not None else {}, obj.meta)
     dumped = _dump(obj)
     return dumped if dumped is not None else {}
 
@@ -80,7 +154,11 @@ def _unwrap_payload(body: Any) -> Any:
     """
     if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
         data = body["data"]
-        return data if data is not None else {}
+        result = _with_warnings(data if data is not None else {}, body.get("meta"))
+        rid = _request_id_of(body)
+        if rid and isinstance(result, dict) and "request_id" not in result:
+            result["request_id"] = rid
+        return result
     return body if body is not None else {}
 
 
@@ -109,6 +187,38 @@ def _bool_str(value: bool | None) -> str | None:
     if value is None:
         return None
     return "true" if value else "false"
+
+
+def _query_retry_delay(response: httpx.Response | None, retries: int) -> float:
+    """Mirror the SDK read retry policy, as in PR #41's wire bridge."""
+    if response is not None:
+        headers = response.headers
+        value = headers.get("retry-after-ms")
+        try:
+            delay = int(value) / 1000 if value is not None else 0
+        except ValueError:
+            delay = 0
+        if delay > 0:
+            return min(delay, 60.0)
+        value = headers.get("retry-after")
+        if value:
+            try:
+                delay = (
+                    float(int(value))
+                    if value.strip().isdigit()
+                    else email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+                )
+            except (ValueError, TypeError, OverflowError):
+                delay = 0
+            if delay > 0:
+                return min(delay, 60.0)
+        try:
+            reset_delay = int(headers.get("x-ratelimit-reset", "0")) - time.time()
+        except ValueError:
+            reset_delay = 0
+        if reset_delay > 0:
+            return min(reset_delay, 60.0) * (1 + random.SystemRandom().random() * 0.2)
+    return min(2.0**retries, 60.0) * (0.9 + random.SystemRandom().random() * 0.2)
 
 
 #: Storage layouts (PRO-1618). ``split`` is every database that predates the
@@ -172,6 +282,21 @@ class _Databases(_Resource):
         """
         if layout is not None and layout not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
             raise ValueError(f"layout must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}', got {layout!r}")
+        if layout is not None and "type" not in inspect.signature(self._w._sdk.databases.create).parameters:
+            return self._w._raw_post(
+                "/databases",
+                json_body={
+                    key: value
+                    for key, value in {
+                        "database": database,
+                        "embeddings_dimension": embeddings_dimension,
+                        "is_embeddings_tenant": is_embeddings_tenant,
+                        "database_metadata_schema": database_metadata_schema,
+                        "type": layout,
+                    }.items()
+                    if value is not None
+                },
+            )
         resp = self._invoke(
             self._w._sdk.databases.create,
             database=database,
@@ -292,14 +417,19 @@ class _Context(_Resource):
         self,
         *,
         query: str,
-        kind: str | None = None,
+        kind: str | None = "all",
         operator: str | None = None,
         max_results: int | None = None,
         mode: str | None = None,
         alpha: float | None = None,
-        recency_bias: float | None = None,
+        recency_bias: float | None = 0.6,
         graph_context: bool | None = None,
         additional_context: str | None = None,
+        additional_graph_context: str | None = None,
+        context: str | None = None,
+        query_explicit_relations: bool | None = None,
+        follow_forceful_relations: bool | None = None,
+        query_forceful_relations: bool | None = None,
         query_by: str | None = None,
         titles: list[str] | None = None,
         acl: list[str] | None = None,
@@ -312,12 +442,16 @@ class _Context(_Resource):
         """
         database_name = self._w._require_database(database)
         collection_name = self._w._resolve_collection(collection)
+        controls = _query_controls(
+            query_explicit_relations=query_explicit_relations,
+            follow_forceful_relations=follow_forceful_relations,
+            query_forceful_relations=query_forceful_relations,
+            additional_graph_context=additional_graph_context,
+            additional_context=additional_context,
+            context=context,
+        )
 
-        # hydradb-sdk 2.1.4 predates the titles field and would reject the
-        # unknown keyword before sending a request. Use the wrapper's equivalent
-        # v2 JSON transport only for title-filtered queries until the generated
-        # SDK exposes it; ordinary queries remain on the SDK path.
-        if titles:
+        if titles or any(key not in inspect.signature(self._w._sdk.query).parameters for key in controls):
             body = {
                 key: value
                 for key, value in {
@@ -329,7 +463,7 @@ class _Context(_Resource):
                     "alpha": alpha,
                     "recency_bias": recency_bias,
                     "graph_context": graph_context,
-                    "additional_context": additional_context,
+                    **controls,
                     "query_by": query_by,
                     "titles": titles,
                     "acl": acl,
@@ -338,7 +472,7 @@ class _Context(_Resource):
                 }.items()
                 if value is not None
             }
-            result = self._w._raw_post("/query", json_body=body)
+            result = self._w._raw_post("/query", json_body=body, read_only=True)
             return result if isinstance(result, dict) else {}
 
         resp = self._invoke(
@@ -351,7 +485,7 @@ class _Context(_Resource):
             alpha=alpha,
             recency_bias=recency_bias,
             graph_context=graph_context,
-            additional_context=additional_context,
+            **controls,
             query_by=query_by,
             acl=acl,
             database=database_name,
@@ -377,9 +511,13 @@ class _Context(_Resource):
         max_results: int | None = None,
         mode: str | None = None,
         alpha: float | None = None,
-        recency_bias: float | None = None,
+        recency_bias: float | None = 0.6,
         graph_context: bool | None = None,
         additional_context: str | None = None,
+        additional_graph_context: str | None = None,
+        context: str | None = None,
+        query_explicit_relations: bool | None = None,
+        query_forceful_relations: bool | None = None,
         query_by: str | None = None,
         titles: list[str] | None = None,
         acl: list[str] | None = None,
@@ -390,15 +528,15 @@ class _Context(_Resource):
         """``POST /query`` against a UNIFIED database (PRO-1618).
 
         Never sends ``type``: a unified database has one corpus, and the server
-        refuses ``knowledge``/``memory`` there. The SDK (2.1.6+) reads the
-        answer as its four-key ``SearchQueryResult``.
+        refuses ``knowledge``/``memory`` there. Unsupported request controls
+        use the wrapper's raw transport; published SDK schemas withhold them.
 
         Returns ``(body, request_id)``. ``body`` is the four-key response
         (``chunks``, ``graph``, ``forceful_relations``, ``llm_prompt``) as the
         server sent it: dumped with ``exclude_unset`` so no key the server did
-        not send is added, and ``--output json`` prints it verbatim.
-        ``request_id`` is lifted from the envelope's ``meta`` for ``hydradb
-        feedback``, the one thing the body cannot carry.
+        not send is added by SDK defaults.
+        ``request_id`` is lifted from the envelope's ``meta`` for feedback.
+        Envelope warnings are preserved alongside the response payload.
         """
         kwargs = {
             "database": self._w._require_database(database),
@@ -410,12 +548,29 @@ class _Context(_Resource):
             "alpha": alpha,
             "recency_bias": recency_bias,
             "graph_context": graph_context,
-            "additional_context": additional_context,
+            **_query_controls(
+                query_explicit_relations=query_explicit_relations,
+                follow_forceful_relations=follow_forceful_relations,
+                query_forceful_relations=query_forceful_relations,
+                additional_graph_context=additional_graph_context,
+                additional_context=additional_context,
+                context=context,
+            ),
             "query_by": query_by,
             "titles": titles,
             "acl": acl,
-            "follow_forceful_relations": follow_forceful_relations,
         }
+        if any(
+            value is not None and key not in inspect.signature(self._w._sdk.query).parameters
+            for key, value in kwargs.items()
+        ):
+            envelope = self._w._raw_post(
+                "/query", json_body={k: v for k, v in kwargs.items() if v is not None}, unwrap=False, read_only=True
+            )
+            body = envelope
+            if isinstance(envelope, dict) and "data" in envelope and {"success", "meta", "error"} & envelope.keys():
+                body = _with_warnings(envelope["data"] or {}, envelope.get("meta"))
+            return body if isinstance(body, dict) else {}, _request_id_of(envelope)
         try:
             resp = self._w._sdk.query(**{k: v for k, v in kwargs.items() if v is not None})
         except ParsingError as exc:
@@ -425,14 +580,14 @@ class _Context(_Resource):
             envelope = exc.body if isinstance(exc.body, dict) else None
             body = envelope.get("data") if envelope else None
             if exc.status_code and 200 <= exc.status_code < 300 and isinstance(body, dict):
-                return body, _request_id_of(envelope)
+                return _with_warnings(body, envelope.get("meta")), _request_id_of(envelope)
             raise translate_sdk_error(exc) from exc
         except (ApiError, httpx.HTTPError) as exc:
             raise translate_sdk_error(exc) from exc
         data = getattr(resp, "data", None)
         dump = getattr(data, "model_dump", None)
-        body = dump(mode="json", by_alias=True, exclude_unset=True) if callable(dump) else _unwrap(resp)
-        return (body if isinstance(body, dict) else {}), _request_id_of(resp)
+        body = dump(mode="json", by_alias=True, exclude_unset=True) if callable(dump) else data
+        return _with_warnings(body if isinstance(body, dict) else {}, getattr(resp, "meta", None)), _request_id_of(resp)
 
     def ingest(
         self,
@@ -488,6 +643,25 @@ class _Context(_Resource):
                 item["title"] = title
             app_knowledge = json.dumps([item])
 
+        if (
+            app_knowledge is not None
+            and "app_knowledge" not in inspect.signature(self._w._sdk.context.ingest).parameters
+        ):
+            return self._w._raw_post(
+                "/context/ingest",
+                form_body={
+                    key: value
+                    for key, value in {
+                        "database": self._w._require_database(database),
+                        "collection": self._w._resolve_collection(collection),
+                        "type": kind,
+                        "app_knowledge": app_knowledge,
+                        "document_metadata": document_metadata,
+                        "upsert": _bool_str(upsert),
+                    }.items()
+                    if value is not None
+                },
+            )
         resp = self._invoke(
             self._w._sdk.context.ingest,
             database=self._w._require_database(database),
@@ -572,6 +746,10 @@ class _Context(_Resource):
             merged["success_count"] += result.get("success_count") or 0
             merged["failed_count"] += result.get("failed_count") or 0
             merged["results"].extend(result.get("results") or [])
+            for key in ("warnings", "response_warnings"):
+                if key in result:
+                    warnings = result[key]
+                    merged.setdefault(key, []).extend(warnings if isinstance(warnings, list) else [warnings])
         return merged
 
     def list(
@@ -601,7 +779,11 @@ class _Context(_Resource):
         if isinstance(data, dict):
             inner = data.get("inner")
             if isinstance(inner, dict):
-                return inner
+                flattened = dict(inner)
+                for key in ("warnings", "response_warnings"):
+                    if key in data:
+                        _merge_warning_field(flattened, key, data[key])
+                return flattened
             if "inner" in data:
                 return {k: v for k, v in data.items() if k != "inner"}
         return data
@@ -1198,12 +1380,17 @@ class HydraDB:
 
         # Unwrap by SHAPE, never by assumption: the connector endpoints mostly
         # return bare objects rather than a HandlerEnvelope.
-        if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
-            data = body["data"]
-            return data if data is not None else {}
-        return body if body is not None else {}
+        return _unwrap_payload(body)
 
-    def _raw_post(self, path: str, *, json_body: Any) -> Any:
+    def _raw_post(
+        self,
+        path: str,
+        *,
+        json_body: Any = None,
+        form_body: dict | None = None,
+        unwrap: bool = True,
+        read_only: bool = False,
+    ) -> Any:
         """POST an endpoint the SDK cannot express, with the same error contract.
 
         The sibling of :meth:`_raw_get` (CONTRACT §2 rule 7). Same auth and
@@ -1214,15 +1401,29 @@ class HydraDB:
             "Authorization": f"Bearer {self._token}",
             "API-Version": "2",
         }
-        try:
-            response = httpx.post(
-                f"{self._base_url.rstrip('/')}{path}",
-                headers=headers,
-                json=json_body,
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise translate_sdk_error(exc) from exc
+        for attempt in range(3 if read_only else 1):
+            try:
+                response = httpx.post(
+                    f"{self._base_url.rstrip('/')}{path}",
+                    headers=headers,
+                    **(
+                        {"files": {key: (None, value) for key, value in form_body.items()}}
+                        if form_body is not None
+                        else {"json": json_body}
+                    ),
+                    timeout=self._timeout,
+                )
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                if read_only and attempt < 2:
+                    time.sleep(_query_retry_delay(None, attempt))
+                    continue
+                raise translate_sdk_error(exc) from exc
+            except httpx.HTTPError as exc:
+                raise translate_sdk_error(exc) from exc
+            if read_only and attempt < 2 and (response.status_code >= 500 or response.status_code in (408, 409, 429)):
+                time.sleep(_query_retry_delay(response, attempt))
+                continue
+            break
 
         try:
             body = response.json() if response.content else None
@@ -1232,14 +1433,14 @@ class HydraDB:
         if response.is_error:
             raise HydraDBClientError(response.status_code, _stringify_body(body))
 
-        return _unwrap_payload(body)
+        return _unwrap_payload(body) if unwrap else body
 
     def _require_database(self, database: str | None) -> str:
         db = database or self.default_database
         if not db or not str(db).strip():
             raise HydraDBClientError(
                 0,
-                "No database specified. Use --database or run 'hydradb config set tenant_id <id>'.",
+                "No database specified. Use --database or run 'hydradb config set database <id>'.",
             )
         return db
 

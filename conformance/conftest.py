@@ -43,8 +43,12 @@ class Recorder:
         self.content_type = request.headers.get("content-type", "")
         self.params = dict(request.url.params)
         self.body = request.content
-        # A minimal, universally-parseable envelope so SDK response parsing succeeds.
-        return httpx.Response(200, json={"success": True, "data": {}, "meta": {}})
+        payload = (
+            {"database": "db_test", "status": "accepted"}
+            if request.url.path in ("/databases", "/databases/status", "/databases/stats")
+            else {}
+        )
+        return httpx.Response(200, json={"success": True, "data": payload, "meta": {}})
 
     # -- extraction helpers ---------------------------------------------------
 
@@ -115,8 +119,10 @@ def wrapper(recorder: Recorder, scope_defaults: dict, monkeypatch) -> HydraDB:
     )
 
     def _via_recorder(method: str):
-        def call(url, *, headers=None, json=None, params=None, timeout=None, **_ignored):
-            return recorder.handler(httpx.Request(method, url, headers=headers, json=json, params=params))
+        def call(url, *, headers=None, json=None, params=None, files=None, timeout=None, **_ignored):
+            request = httpx.Request(method, url, headers=headers, json=json, params=params, files=files)
+            request.read()
+            return recorder.handler(request)
 
         return call
 
