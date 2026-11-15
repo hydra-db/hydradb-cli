@@ -277,10 +277,14 @@ class TestLayoutProbe:
 
 
 class TestUnifiedQueryWrapper:
-    def test_sends_no_type_through_the_sdk_and_returns_the_body_verbatim(self):
+    def test_sends_no_type_through_the_sdk_and_returns_the_body_verbatim(self, monkeypatch):
         seen = []
         envelope = {"success": True, "data": UNIFIED_BODY, "meta": {"request_id": "req-1", "latency_ms": 12}}
-        w = _real_wrapper(_sdk_server({"/query": (200, envelope)}, seen))
+        handler = _sdk_server({"/query": (200, envelope)}, seen)
+        monkeypatch.setattr(
+            "hydradb_cli.hydra.client.httpx.post", httpx.Client(transport=httpx.MockTransport(handler)).post
+        )
+        w = _real_wrapper(handler)
         body, request_id = w.context.query_unified(
             query="pro plan",
             operator="and",
@@ -301,6 +305,7 @@ class TestUnifiedQueryWrapper:
             "query": "pro plan",
             "operator": "and",
             "max_results": 5,
+            "recency_bias": 0.6,
             "mode": "fast",
             "query_by": "text",
             "titles": ["Q3"],
@@ -312,7 +317,7 @@ class TestUnifiedQueryWrapper:
         seen = []
         w = _real_wrapper(_sdk_server({"/query": (200, {"success": True, "data": EMPTY_BODY, "meta": {}})}, seen))
         body, request_id = w.context.query_unified(query="q")
-        assert seen[0][2] == {"database": "db_test", "collection": "col_test", "query": "q"}
+        assert seen[0][2] == {"database": "db_test", "collection": "col_test", "query": "q", "recency_bias": 0.6}
         assert body == EMPTY_BODY
         assert request_id is None
 
@@ -488,7 +493,15 @@ class TestUnifiedQueryCommand:
         with _patch(w):
             result = runner.invoke(app, ["--output", "json", "query", "pro plan"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout) == UNIFIED_BODY
+        assert json.loads(result.stdout) == {
+            **UNIFIED_BODY,
+            "scope": {
+                "database": "t1",
+                "collection": None,
+                "database_source": "default",
+                "collection_source": "server_default",
+            },
+        }
 
     def test_llm_prints_the_prompt_verbatim_on_stdout(self):
         _auth()
@@ -505,7 +518,15 @@ class TestUnifiedQueryCommand:
         with _patch(w):
             result = runner.invoke(app, ["--output", "json", "query", "pro plan", "--llm"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout) == UNIFIED_BODY
+        assert json.loads(result.stdout) == {
+            **UNIFIED_BODY,
+            "scope": {
+                "database": "t1",
+                "collection": None,
+                "database_source": "default",
+                "collection_source": "server_default",
+            },
+        }
 
     def test_an_empty_result_still_prints_the_request_id(self):
         _auth()
@@ -549,12 +570,16 @@ class TestUnifiedQueryCommand:
     def test_llm_and_follow_flags_are_refused_on_a_split_database(self):
         _auth()
         w = _mock("split", **{"context.query": {"chunks": []}})
-        for extra in (["--llm"], ["--no-follow-forceful-relations"], ["--follow-forceful-relations"]):
-            with _patch(w):
-                result = runner.invoke(app, ["query", "x", *extra])
-            assert result.exit_code != 0, extra
-            assert "unified databases only" in result.output
+        with _patch(w):
+            result = runner.invoke(app, ["query", "x", "--llm"])
+        assert result.exit_code != 0
+        assert "unified databases only" in result.output
         w.context.query.assert_not_called()
+        for flag, value in (("--no-follow-forceful-relations", False), ("--follow-forceful-relations", True)):
+            with _patch(w):
+                result = runner.invoke(app, ["query", "x", flag])
+            assert result.exit_code == 0, result.output
+            assert w.context.query.call_args.kwargs["follow_forceful_relations"] is value
 
     def test_split_query_call_is_unchanged(self):
         _auth()
@@ -594,7 +619,15 @@ class TestUnifiedQueryCommand:
             outputs[mode] = result
         assert "hydradb feedback req-7" in outputs["human"].output
         assert "req-7" in outputs["llm"].stderr
-        assert json.loads(outputs["json"].stdout) == UNIFIED_BODY
+        assert json.loads(outputs["json"].stdout) == {
+            **UNIFIED_BODY,
+            "scope": {
+                "database": "db_test",
+                "collection": None,
+                "database_source": "default",
+                "collection_source": "server_default",
+            },
+        }
 
     def test_end_to_end_json_is_the_server_body_verbatim(self, monkeypatch):
         """Real wrapper and SDK: the probe, then the type-less query."""
@@ -609,7 +642,15 @@ class TestUnifiedQueryCommand:
         with patch("hydradb_cli.commands._impl.get_wrapper", return_value=_real_wrapper(_sdk_server(routes, seen))):
             result = runner.invoke(app, ["--output", "json", "query", "pro plan"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout) == UNIFIED_BODY
+        assert json.loads(result.stdout) == {
+            **UNIFIED_BODY,
+            "scope": {
+                "database": "db_test",
+                "collection": "col_test",
+                "database_source": "default",
+                "collection_source": "default",
+            },
+        }
         assert [path for _, path, _ in seen] == ["/databases", "/query"]
         assert "type" not in seen[1][2]
 
@@ -870,7 +911,15 @@ class TestUnifiedIngestCommand:
         with _patch(w):
             result = runner.invoke(app, ["--output", "json", "ingest", "--text", "a note"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout) == INGEST_202
+        assert json.loads(result.stdout) == {
+            **INGEST_202,
+            "scope": {
+                "database": "t1",
+                "collection": None,
+                "database_source": "default",
+                "collection_source": "server_default",
+            },
+        }
 
     def test_a_failed_item_is_reported(self):
         _auth()
@@ -1227,12 +1276,14 @@ class TestDatabaseLayoutCommands:
         assert "split" in result.output and "unified" in result.output
         w.databases.create.assert_not_called()
 
-    def test_wrapper_create_with_a_layout_sends_type_through_the_sdk(self):
+    def test_wrapper_create_with_a_layout_sends_type_through_the_sdk(self, monkeypatch):
         seen = []
         accepted = {"success": True, "data": {"status": "accepted"}, "meta": {}}
-        out = _real_wrapper(_sdk_server({"/databases": (200, accepted)}, seen)).databases.create(
-            database="new", layout="unified"
+        handler = _sdk_server({"/databases": (200, accepted)}, seen)
+        monkeypatch.setattr(
+            "hydradb_cli.hydra.client.httpx.post", httpx.Client(transport=httpx.MockTransport(handler)).post
         )
+        out = _real_wrapper(handler).databases.create(database="new", layout="unified")
         assert out.get("status") == "accepted"
         assert seen == [("POST", "/databases", {"database": "new", "type": "unified"})]
 
@@ -1242,7 +1293,9 @@ class TestDatabaseLayoutCommands:
         def handler(request):
             seen["path"] = request.url.path
             seen["body"] = json.loads(request.content)
-            return httpx.Response(200, json={"success": True, "data": {"status": "accepted"}, "meta": {}})
+            return httpx.Response(
+                200, json={"success": True, "data": {"database": "new", "status": "accepted"}, "meta": {}}
+            )
 
         _real_wrapper(handler).databases.create(database="new")
         assert seen["path"] == "/databases"

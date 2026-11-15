@@ -16,10 +16,22 @@ from rich.panel import Panel
 
 from hydradb_cli.commands import _impl
 from hydradb_cli.config import get_full_config
-from hydradb_cli.output import console, make_kv_table, print_error, print_json, spinner
+from hydradb_cli.output import console, make_kv_table, print_error, print_json, spinner, warn_deprecated
 from hydradb_cli.utils.common import mask_api_key, read_stdin_safe, resolve_scope_flags
 
 database_app = typer.Typer(help="Manage [bold]databases[/bold] (create, delete, list, collections, stats, readiness).")
+
+
+def _resolve_type(type_: str | None, kind: str | None, *, query: bool = False) -> str | None:
+    allowed = {"memory", "knowledge", "all"} if query else {"memory", "knowledge"}
+    for flag, value in (("--type", type_), ("--kind", kind)):
+        if value is not None and value not in allowed:
+            print_error(f"{flag} must be one of: {', '.join(sorted(allowed))}. Got '{value}'.")
+    if type_ is not None and kind is not None and type_ != kind:
+        print_error("--type and --kind conflict; pass one selector or the same value for both.")
+    if kind is not None:
+        warn_deprecated("--kind", "--type")
+    return type_ if type_ is not None else kind
 
 
 def _resolve_text_input(text: str | None) -> str:
@@ -47,18 +59,30 @@ def _resolve_text_input(text: str | None) -> str:
 
 def query(
     query_text: str = typer.Argument(metavar="QUERY", help="Search query."),
-    kind: str | None = typer.Option(
-        None, "--kind", help="Corpus to query on a split database: 'memory' or 'knowledge'. Not used on a unified one."
+    type_: str | None = typer.Option(
+        None, "--type", help="Split corpus: 'all' (default), 'memory', or 'knowledge'. Omitted on unified databases."
     ),
+    kind: str | None = typer.Option(None, "--kind", help="Deprecated alias for --type."),
     operator: str | None = typer.Option(None, "--operator", help="Keyword operator: 'or', 'and', or 'phrase'."),
     max_results: int = typer.Option(10, "--max-results", "-n", help="Maximum number of results (1-50)."),
     mode: str | None = typer.Option(None, "--mode", "-m", help="Retrieval mode: 'fast' or 'thinking'."),
     alpha: float | None = typer.Option(None, "--alpha", help="Hybrid search alpha (0.0=keyword, 1.0=semantic)."),
-    recency_bias: float | None = typer.Option(None, "--recency-bias", help="Preference for newer content (0.0-1.0)."),
+    recency_bias: float | None = typer.Option(0.6, "--recency-bias", help="Preference for newer content (0.0-1.0)."),
     graph_context: bool | None = typer.Option(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),
-    additional_context: str | None = typer.Option(None, "--context", help="Additional context to guide retrieval."),
+    additional_graph_context: str | None = typer.Option(
+        None,
+        "--additional-graph-context",
+        "--additional_graph_context",
+        help="A context string to guide retrieval, not a response chunk map.",
+    ),
+    additional_context: str | None = typer.Option(
+        None, "--additional-context", help="Legacy retrieval hint; use --additional-graph-context."
+    ),
+    context: str | None = typer.Option(
+        None, "--context", help="Legacy retrieval hint; use --additional-graph-context."
+    ),
     titles: list[str] | None = typer.Option(
         None,
         "--title",
@@ -72,7 +96,17 @@ def query(
     follow_forceful_relations: bool | None = typer.Option(
         None,
         "--follow-forceful-relations/--no-follow-forceful-relations",
-        help="Unified databases only: also return chunks pulled in by relations declared at ingest (server default on).",
+        help="Legacy alias for --query-explicit-relations (server default on).",
+    ),
+    query_explicit_relations: bool | None = typer.Option(
+        None,
+        "--query-explicit-relations/--no-query-explicit-relations",
+        help="Follow relations declared at ingest (default on). Overrides both legacy relation flags.",
+    ),
+    query_forceful_relations: bool | None = typer.Option(
+        None,
+        "--query-forceful-relations/--no-query-forceful-relations",
+        help="Legacy relation toggle; prefer --query-explicit-relations.",
     ),
     llm: bool = typer.Option(
         False,
@@ -85,6 +119,15 @@ def query(
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
     """Query knowledge or memories — the single retrieval entry point."""
+    kind = _resolve_type(type_, kind, query=True)
+    if context is not None:
+        warn_deprecated("--context", "--additional-graph-context")
+    if additional_context is not None:
+        warn_deprecated("--additional-context", "--additional-graph-context")
+    if follow_forceful_relations is not None:
+        warn_deprecated("--follow-forceful-relations", "--query-explicit-relations")
+    if query_forceful_relations is not None:
+        warn_deprecated("--query-forceful-relations", "--query-explicit-relations")
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_query(
         query_text,
@@ -95,7 +138,10 @@ def query(
         alpha=alpha,
         recency_bias=recency_bias,
         graph_context=graph_context,
-        additional_context=additional_context,
+        additional_context=additional_context if additional_context is not None else context,
+        **({"additional_graph_context": additional_graph_context} if additional_graph_context is not None else {}),
+        **({"query_explicit_relations": query_explicit_relations} if query_explicit_relations is not None else {}),
+        **({"query_forceful_relations": query_forceful_relations} if query_forceful_relations is not None else {}),
         titles=list(titles) if titles else None,
         acl=list(acl) if acl else None,
         follow_forceful_relations=follow_forceful_relations,
@@ -143,10 +189,13 @@ def feedback(
 
 def ingest(
     files: list[str] | None = typer.Argument(None, help="Knowledge file path(s) to ingest (split databases only)."),
+    type_: str | None = typer.Option(
+        None, "--type", help="Explicit split corpus: 'memory' or 'knowledge'. Omit for automatic layout-aware routing."
+    ),
     kind: str | None = typer.Option(
         None,
         "--kind",
-        help="Kind to ingest on a split database: 'memory' (default) or 'knowledge'. Not used on a unified one.",
+        help="Deprecated alias for --type.",
     ),
     text: str | None = typer.Option(None, "--text", "-t", help="Text to ingest. Use '-' to read from stdin."),
     title: str | None = typer.Option(None, "--title", help="Optional title."),
@@ -207,6 +256,7 @@ def ingest(
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
     """Ingest a memory, knowledge text, or knowledge file(s); on a unified database, one context item."""
+    kind = _resolve_type(type_, kind)
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     # The layout decides the request shape (PRO-1618), never a flag: a unified
     # database gets one JSON context item and never a kind; a split one keeps
@@ -222,7 +272,7 @@ def ingest(
                 "Extract the text and pass it with --text."
             )
         if kind:
-            print_error(f"Database '{db}' is unified: it has one corpus, so --kind does not apply. Omit it.")
+            print_error(f"Database '{db}' is unified: it has one corpus, so --type/--kind does not apply. Omit it.")
         if markdown:
             print_error("--markdown does not apply on a unified database.")
         if conversation_file and text:
@@ -316,6 +366,9 @@ def ingest(
 
 
 def list_items(
+    type_: str | None = typer.Option(
+        None, "--type", help="Split corpus: 'memory' or 'knowledge'. Omit on unified databases."
+    ),
     kind: str | None = typer.Option(
         None, "--kind", help="Filter by kind on a split database: 'memory' or 'knowledge'. Not used on a unified one."
     ),
@@ -332,6 +385,7 @@ def list_items(
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
     """List ingested sources and memories."""
+    kind = _resolve_type(type_, kind)
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_list(
         kind=kind, page=page, page_size=page_size, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
@@ -358,6 +412,9 @@ def inspect(
 
 def delete(
     ids: list[str] = typer.Argument(help="One or more IDs to delete."),
+    type_: str | None = typer.Option(
+        None, "--type", help="Split corpus: 'knowledge' (default) or 'memory'. Omit on unified databases."
+    ),
     kind: str | None = typer.Option(
         None,
         "--kind",
@@ -370,6 +427,7 @@ def delete(
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
 ) -> None:
     """Delete memories or knowledge sources by ID."""
+    kind = _resolve_type(type_, kind)
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     clean_ids = [i.strip() for i in ids if i.strip()]
     if not clean_ids:
@@ -381,6 +439,9 @@ def delete(
 
 def relations(
     source_id: str = typer.Argument(help="Source ID to fetch graph relations for."),
+    type_: str | None = typer.Option(
+        None, "--type", help="Split corpus: 'memory' or 'knowledge'. Omit on unified databases."
+    ),
     kind: str | None = typer.Option(
         None, "--kind", help="Corpus on a split database: 'memory' or 'knowledge'. Not used on a unified one."
     ),
@@ -396,6 +457,7 @@ def relations(
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
     """Fetch knowledge-graph relations for a source."""
+    kind = _resolve_type(type_, kind)
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_relations(
         source_id, kind=kind, limit=limit, acl=list(acl) if acl else None, tenant_id=tid, sub_tenant_id=stid
@@ -404,6 +466,9 @@ def relations(
 
 def subgraph(
     source_id: str = typer.Argument(help="Item ID to start from (from 'hydradb query' or 'hydradb list')."),
+    type_: str | None = typer.Option(
+        None, "--type", help="Split corpus: 'knowledge' (default) or 'memory'. Omit on unified databases."
+    ),
     kind: str | None = typer.Option(
         None, "--kind", help="Corpus on a split database: 'knowledge' (default) or 'memory'. Not used on a unified one."
     ),
@@ -420,6 +485,7 @@ def subgraph(
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", hidden=True),
 ) -> None:
     """Everything connected to one item: its thread, replies, parents, children, links."""
+    kind = _resolve_type(type_, kind)
     tid, stid = resolve_scope_flags(database, collection, tenant_id, sub_tenant_id)
     _impl.do_subgraph(
         source_id,

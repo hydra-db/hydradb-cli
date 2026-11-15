@@ -41,7 +41,7 @@ class _FakeEnvelope:
         self.meta = None
 
 
-def _wrapper_with_response(response_json, status=200, captured=None):
+def _wrapper_with_response(response_json, status=200, captured=None, monkeypatch=None):
     """Build a wrapper whose SDK returns ``response_json`` for any request."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -53,6 +53,8 @@ def _wrapper_with_response(response_json, status=200, captured=None):
     w._sdk = _SdkHydraDB(
         token="x", base_url="http://test.local", httpx_client=httpx.Client(transport=httpx.MockTransport(handler))
     )
+    if monkeypatch is not None:
+        monkeypatch.setattr(httpx, "post", httpx.Client(transport=httpx.MockTransport(handler)).post)
     return w
 
 
@@ -125,9 +127,11 @@ class TestIngest:
         assert b"dark mode" in request.content
         assert b'name="app_knowledge"' not in request.content
 
-    def test_ingest_knowledge_text_uses_app_knowledge(self):
+    def test_ingest_knowledge_text_uses_app_knowledge(self, monkeypatch):
         captured = {}
-        w = _wrapper_with_response({"success": True, "data": {}, "meta": {}}, captured=captured)
+        w = _wrapper_with_response(
+            {"success": True, "data": {}, "meta": {}}, captured=captured, monkeypatch=monkeypatch
+        )
         w.context.ingest(kind="knowledge", text="report", title="Q3")
         request = captured["request"]
         assert request.headers["content-type"].startswith("multipart/form-data")
@@ -139,11 +143,13 @@ class TestIngest:
         assert b'name="app_sources"' not in request.content
         assert b'name="documents"' not in request.content
 
-    def test_ingest_knowledge_text_preserves_source_id_for_delete(self):
+    def test_ingest_knowledge_text_preserves_source_id_for_delete(self, monkeypatch):
         """`--source-id foo` must survive ingest (app_knowledge `id`) so a later
         delete-by-id addresses the same source."""
         cap_ingest = {}
-        w = _wrapper_with_response({"success": True, "data": {}, "meta": {}}, captured=cap_ingest)
+        w = _wrapper_with_response(
+            {"success": True, "data": {}, "meta": {}}, captured=cap_ingest, monkeypatch=monkeypatch
+        )
         w.context.ingest(kind="knowledge", text="report", source_id="foo")
         fields = _multipart_fields(cap_ingest["request"])
         item = json.loads(fields["app_knowledge"])[0]
@@ -261,7 +267,7 @@ class TestConnectors:
 
     def test_delete_resource_passes_both_path_params(self):
         captured = {}
-        w = _wrapper_with_response({}, captured=captured)
+        w = _wrapper_with_response({"connector_id": "c1", "resource_id": "r1"}, captured=captured)
         w.connectors.remove_resource("c1", "r1")
         assert captured["request"].url.path.endswith("/connectors/c1/resources/r1")
 
@@ -715,3 +721,99 @@ class TestQueryRequestId:
             }
         )
         assert w.context.query(query="hello")["request_id"] == "from-data"
+
+
+class TestAclEnforcementSync:
+    def test_query_preserves_warning_and_request_id(self):
+        w = _wrapper_with_response(
+            {
+                "success": True,
+                "data": {"chunks": []},
+                "meta": {
+                    "request_id": "rid",
+                    "warnings": [{"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}],
+                },
+            }
+        )
+        result = w.context.query(query="hello", acl=["someone"])
+        assert result["request_id"] == "rid"
+        assert result["warnings"][0]["code"] == "acl_ignored_by_connector_enforcement"
+
+    def test_raw_envelope_preserves_warnings_and_request_id(self, monkeypatch, capsys):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = HydraDB(token="x", base_url="http://test.local", database="db_test")
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda *a, **kw: httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"sources": []},
+                    "meta": {"request_id": "raw-id", "warnings": [warning]},
+                },
+            ),
+        )
+        result = w.context.subgraph(id="source")
+        assert result == {"sources": [], "request_id": "raw-id", "warnings": [warning]}
+        assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err
+
+    def test_list_preserves_warning_when_flattening(self):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = _wrapper_with_response(
+            {"success": True, "data": {"inner": {"sources": []}}, "meta": {"warnings": [warning]}}
+        )
+        assert w.context.list()["warnings"] == [warning]
+
+    def test_list_payload_keeps_shape_and_warning_is_visible(self, capsys):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        result = _unwrap_payload({"success": True, "data": [1, 2], "meta": {"warnings": [{"code": "warning-code"}]}})
+        assert result == [1, 2]
+        assert "warning-code" in capsys.readouterr().err
+
+    def test_payload_warning_collision_preserves_envelope_warnings(self, capsys):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload warning"]},
+                "meta": {"warnings": [None, {"message": "missing-code"}, warning]},
+            }
+        )
+        assert result == {"warnings": ["payload warning"], "response_warnings": [warning]}
+        assert "acl_ignored_by_connector_enforcement" in capsys.readouterr().err
+
+    def test_existing_response_warning_field_is_not_replaced(self):
+        from hydradb_cli.hydra.client import _unwrap_payload
+
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        result = _unwrap_payload(
+            {
+                "success": True,
+                "data": {"warnings": ["payload"], "response_warnings": ["keep-me"]},
+                "meta": {"warnings": [warning]},
+            }
+        )
+        assert result == {
+            "warnings": ["payload"],
+            "response_warnings": ["keep-me", warning],
+        }
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"inner": {"sources": [], "warnings": ["payload"]}},
+            {"inner": {"sources": []}, "warnings": ["payload"]},
+        ],
+    )
+    def test_list_flattening_preserves_payload_and_envelope_warnings(self, payload):
+        warning = {"code": "acl_ignored_by_connector_enforcement", "message": "ignored"}
+        w = _wrapper_with_response({"success": True, "data": payload, "meta": {"warnings": [warning]}})
+        assert w.context.list() == {
+            "sources": [],
+            "warnings": ["payload"],
+            "response_warnings": [warning],
+        }

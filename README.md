@@ -103,7 +103,8 @@ If `hydradb` is not found, make sure your virtual environment is activated or th
 
 ## Authentication
 
-Before using any data commands you need to provide your API key and database. There are two ways to do this:
+Authentication needs only an API key. You can list or create databases before
+choosing one; scoped data commands need a database flag or a configured default.
 
 ### Option A — `hydradb login` (persistent)
 
@@ -111,10 +112,15 @@ Credentials are saved to `~/.hydradb/config.json` (file permissions set to `0600
 
 ```bash
 # Interactive — prompts for the API key
-hydradb login --database YOUR_DATABASE
+hydradb login
 
 # Non-interactive
-hydradb login --api-key YOUR_API_KEY --database YOUR_DATABASE
+hydradb login --api-key YOUR_API_KEY
+
+# Discover or create a database, then choose a default
+hydradb database list
+hydradb database create my-database
+hydradb config set database my-database
 
 # Optionally set a collection and a custom API base URL
 hydradb login --api-key YOUR_API_KEY --database YOUR_DATABASE \
@@ -189,8 +195,8 @@ These flags go **before** the subcommand:
 Every command supports JSON output, which is useful for scripting and piping:
 
 ```bash
-hydradb -o json list --kind memory
-hydradb -o json query "pricing" --kind knowledge | jq '.chunks[0].chunk_content'
+hydradb -o json list --type memory
+hydradb -o json query "pricing" --type knowledge | jq '.chunks[0].chunk_content'
 ```
 
 The `--output json` shape is a stable, documented contract — the wrapper unwraps
@@ -202,12 +208,23 @@ keep working across SDK updates.
 ### Scope options
 
 Every command that reads or writes data accepts these. Both fall back to your saved
-config, so you can omit them once `hydradb login` has run.
+config. Login alone does not select a database: use `--database` or
+`hydradb config set database <id>` before a scoped operation.
 
 | Flag | Description |
 |------|-------------|
 | `--database` / `-d` | Database to operate on |
 | `--collection` | Collection (partition) within the database |
+
+Context command responses include a machine-readable `scope` object in JSON
+mode, alongside any server warnings. It reports the database and collection and
+whether each came from an explicit flag or a configured default. An omitted
+collection remains omitted on the wire and is reported as `null` with
+`collection_source: "server_default"`; the CLI does not guess the server's
+collection name. Human output and `--llm` put this notice on stderr, leaving a
+piped prompt intact. Overrides apply only to that command, not your saved config.
+Server warnings also go to stderr and remain in JSON responses as `warnings`
+(or `response_warnings` if the payload already owns `warnings`).
 
 ---
 
@@ -217,22 +234,22 @@ Retrieve knowledge or memories — the single entry point for search.
 
 | Option | Description |
 |--------|-------------|
-| `--kind` | Split databases: corpus to search, `memory` or `knowledge`. Omit to search both. Not used on a unified database |
+| `--type` | Split databases: `all` (default), `memory` or `knowledge`. Omit on unified databases; every explicit selector is refused there |
 | `--operator` | Keyword operator: `or`, `and`, `phrase` |
 | `--max-results` / `-n` | Maximum results, 1–50 (default `10`) |
 | `--mode` / `-m` | Retrieval mode: `fast` or `thinking` |
 | `--alpha` | Hybrid search weight (`0.0` keyword → `1.0` semantic) |
-| `--recency-bias` | Preference for newer content (`0.0`–`1.0`) |
+| `--recency-bias` | Preference for newer content (`0.0`–`1.0`, default `0.6`) |
 | `--graph-context` / `--no-graph-context` | Include knowledge graph relations |
-| `--context` | Additional context to guide retrieval |
+| `--additional-graph-context` | A string hint to guide retrieval; distinct from the linked-chunk map in a split response |
 | `--title` | Exact document title to search inside; repeat the flag for multiple titles |
-| `--follow-forceful-relations` / `--no-follow-forceful-relations` | Unified databases: also return chunks pulled in by relations declared at ingest (server default on) |
+| `--query-explicit-relations` / `--no-query-explicit-relations` | Follow relations declared at ingest (default on) |
 | `--llm` | Unified databases: print the server-built `llm_prompt` verbatim, ready to inject into a model call |
 
 ```bash
 hydradb query "What did the team say about pricing?"
-hydradb query "contract terms" --kind knowledge --mode thinking --max-results 20
-hydradb query "What does the user prefer?" --kind memory
+hydradb query "contract terms" --type knowledge --mode thinking --max-results 20
+hydradb query "What does the user prefer?" --type memory
 hydradb query "pricing AND enterprise" --operator and
 hydradb query "Who owns the rollout?" --title "Q3 Roadmap.md" --title "Smith, John"
 ```
@@ -249,7 +266,20 @@ document (`# Query results`, `## Results`, `## Forceful relations`,
 to cite. The human view renders the first three, with graph paths grouped by
 `origin`: query paths (grown from the query's entities) apart from chunk
 relation paths (listed under the returned chunk they hang under). `--llm`
-prints the prompt on its own; `--output json` prints the body verbatim.
+prints the prompt on its own; `--output json` preserves the body and adds the
+CLI scope notice and any envelope warnings.
+
+`--kind` remains a deprecated alias for `--type`; invalid values or conflicting
+selectors fail locally. Relation aliases use this precedence, including explicit
+false: `query_explicit_relations` > `follow_forceful_relations` >
+`query_forceful_relations` > the server default (`true`). Hint precedence is
+`--additional-graph-context` > `--additional-context` > `--context`, including an
+explicit empty string. The canonical hint is a request string; the similarly
+named response map is read independently, canonical first and legacy second.
+
+Published SDK schemas do not expose all unified or canonical request fields.
+The CLI keeps supported legacy calls on the SDK and uses its existing raw v2
+transport for unsupported fields. No unpublished SDK release is required.
 
 ```bash
 hydradb query "What plan is John on?" --llm | my-model-call
@@ -299,12 +329,14 @@ round trip.
 
 ### ingest
 
-Store a memory, knowledge text, or knowledge file(s). On a split database it
-defaults to `--kind memory`, and file arguments are always knowledge sources.
+Store a memory, knowledge text, or knowledge file(s). Omission selects the
+database's existing layout-aware route: unified databases receive `context[]`
+without a type; split databases retain memory text and knowledge file routes.
+There is no content classifier, and disabling enrichment does not select a corpus.
 
 | Option | Description |
 |--------|-------------|
-| `--kind` | Split databases: `memory` (default) or `knowledge`. Not used on a unified database |
+| `--type` | Split databases: `memory` (default) or `knowledge`. Not used on a unified database |
 | `--text` / `-t` | Text to ingest. Use `-` to read from stdin |
 | `--title` | Optional title |
 | `--source-id` | Client-assigned source identifier (the `--context-id` on a unified database) |
@@ -316,7 +348,8 @@ defaults to `--kind memory`, and file arguments are always knowledge sources.
 ```bash
 hydradb ingest --text "User prefers dark mode and weekly email summaries"
 hydradb ingest --text "Raw meeting notes..." --no-infer --title "Meeting Notes"
-hydradb ingest --kind knowledge --text "Q4 pricing: Starter $29, Pro $79" --title "Pricing"
+hydradb ingest --type knowledge --text "Q4 pricing: Starter $29, Pro $79" --title "Pricing"
+hydradb ingest --type knowledge --text '# Markdown is ordinary text here'
 hydradb ingest ./contract.pdf ./notes.docx
 echo "piped note" | hydradb ingest
 ```
@@ -325,7 +358,7 @@ echo "piped note" | hydradb ingest
 apply to file ingest and are rejected rather than silently ignored.
 
 On a **unified database** `ingest` sends one JSON context item (exactly one of
-`--text` or `--conversation-file`) and never a `type`. Files, `--kind` and
+`--text` or `--conversation-file`) and never a `type`. Files, `--type` and
 `--markdown` are refused there with a message; `--user-name` names the speaker.
 These options apply there and are refused on a split database:
 
@@ -359,15 +392,15 @@ Browse and read back what you have stored.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `list` | Lists ingested sources and memories (`--kind` is for split databases only) | `--kind`, `--page`, `--page-size` |
+| `list` | Lists ingested sources and memories (`--type` is for split databases only) | `--type`, `--page`, `--page-size` |
 | `inspect <id>` | Fetches a source's content or a presigned download URL | `--mode` (`content`, `url`, `both`) |
-| `relations <id>` | Knowledge graph triplets linked to a source | `--kind`, `--limit` |
-| `subgraph <id>` | Everything connected to one item — its thread, replies, parents, children, links — traversed breadth-first | `--kind`, `--depth`, `--max-sources` |
+| `relations <id>` | Knowledge graph triplets linked to a source | `--type`, `--limit` |
+| `subgraph <id>` | Everything connected to one item — its thread, replies, parents, children, links — traversed breadth-first | `--type`, `--depth`, `--max-sources` |
 | `verify <ids...>` | Checks indexing progress of uploaded sources | — |
 
 ```bash
 hydradb list
-hydradb list --kind knowledge --page-size 10
+hydradb list --type knowledge --page-size 10
 hydradb inspect source_abc123
 hydradb inspect source_abc123 --mode url
 hydradb relations source_abc123
@@ -382,12 +415,12 @@ hydradb verify source_abc123
 ### delete
 
 Removes memories or knowledge sources by ID. On a split database it defaults to
-`--kind knowledge`; on a unified database no kind is sent and `--kind` is refused.
+`--type knowledge`; on a unified database no kind is sent and `--type` is refused.
 Prompts for confirmation unless `--yes` is passed.
 
 ```bash
 hydradb delete source_abc123 --yes
-hydradb delete mem_abc123 --kind memory --yes
+hydradb delete mem_abc123 --type memory --yes
 hydradb delete source_abc123 source_def456 --yes
 ```
 
@@ -401,7 +434,7 @@ Create and manage databases.
 
 | Command | What it does | Key options |
 |---------|--------------|-------------|
-| `database create <database>` | Provisions a new database; `--type split` or `--type unified` picks the layout. Without `--type` the server picks, and current servers pick `unified` | `--type` |
+| `database create <database>` | Provisions a new database; `--type split` or `--type unified` picks the layout. Without `--type`, the server uses its deployment default; existing databases keep their layout | `--type` |
 | `database list` | Lists all databases for the authenticated user, with each one's type (`split` or `unified`) | - |
 | `database collections [database]` | Lists collections within a database | — |
 | `database stats [database]` | Row-count statistics | — |
@@ -565,6 +598,9 @@ They will be removed in a future major version.
 | `tenant …` | `database …` |
 | `whoami` | `doctor` |
 | `--tenant-id`, `--sub-tenant-id` | `--database`, `--collection` |
+| `--kind` | `--type` |
+| `--context`, `--additional-context` | `--additional-graph-context` |
+| `--follow-forceful-relations`, `--query-forceful-relations` | `--query-explicit-relations` |
 
 ---
 

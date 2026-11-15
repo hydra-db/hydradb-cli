@@ -29,6 +29,7 @@ from hydradb_cli.hydra import HydraDBClientError
 from hydradb_cli.hydra.client import LAYOUT_SPLIT, LAYOUT_UNIFIED
 from hydradb_cli.output import (
     console,
+    emit_scope_notice,
     err_console,
     get_output_format,
     make_kv_table,
@@ -43,7 +44,7 @@ from hydradb_cli.utils.common import (
     handle_api_error,
     handle_network_error,
     require_tenant_id,
-    resolve_sub_tenant_id,
+    resolve_context_scope,
     validate_range,
 )
 
@@ -207,7 +208,7 @@ def _refuse_kind_on_unified(kind: str | None, database: str) -> None:
     if kind:
         print_error(
             f"Database '{database}' is unified: it has one corpus, so a kind ('{kind}') cannot be selected. "
-            "Re-run without --kind."
+            "Re-run without --kind or --type."
         )
 
 
@@ -256,7 +257,16 @@ def _is_unified_query_body(r: dict) -> bool:
     being there. Stored logs and split databases keep producing the old shape,
     so the layout probe alone cannot decide this.
     """
-    return "llm_prompt" in r or isinstance(r.get("graph"), list) or isinstance(r.get("forceful_relations"), list)
+    if isinstance(r.get("graph"), list) or isinstance(r.get("forceful_relations"), list):
+        return True
+    if any(
+        isinstance(r.get(key), dict)
+        for key in ("graph", "forceful_relations", "graph_context", "additional_graph_context", "additional_context")
+    ):
+        return False
+    if any(isinstance(chunk, dict) and "chunk_content" in chunk for chunk in r.get("chunks") or []):
+        return False
+    return "llm_prompt" in r
 
 
 def _preview(text: str, limit: int) -> str:
@@ -450,14 +460,15 @@ def _format_unified_query_result(r: dict, request_id: str | None = None):
 
 
 def _print_unified_query(body: dict, request_id: str | None, *, llm: bool) -> None:
-    """Print a unified query result. ``--output json`` is the body verbatim, the
-    four keys and nothing added; ``--llm`` is the server-built prompt on plain
+    """Print a unified query result with additive CLI scope metadata in JSON.
+    ``--llm`` is the server-built prompt on plain
     stdout (not Rich, which would re-wrap it at the terminal width and read
     bracketed fragments as markup), with the feedback hint on stderr so the
     prompt can be piped; otherwise the structured rendering."""
     if get_output_format() == "json":
         print_json(body)
         return
+    emit_scope_notice()
     if llm:
         typer.echo(body.get("llm_prompt") or "")
         if request_id:
@@ -472,7 +483,16 @@ def _format_query_result(r: dict):
         # database's layout still answers a type-less query on a unified one
         # in the unified shape). Render it as what it is.
         return _format_unified_query_result(r, r.get("request_id"))
-    chunks = r.get("chunks") or []
+    chunks = list(r.get("chunks") or [])
+    linked = r.get("additional_graph_context")
+    if not isinstance(linked, dict):
+        linked = r.get("additional_context")
+    if isinstance(linked, dict):
+        for value in linked.values():
+            if isinstance(value, list):
+                chunks.extend(chunk for chunk in value if isinstance(chunk, dict))
+            elif isinstance(value, dict):
+                chunks.append(value)
     if not chunks:
         return "[dim]No relevant results found.[/dim]" + _feedback_hint(r)
 
@@ -517,9 +537,12 @@ def do_query(
     max_results: int = 10,
     mode: str | None = None,
     alpha: float | None = None,
-    recency_bias: float | None = None,
+    recency_bias: float | None = 0.6,
     graph_context: bool | None = None,
     additional_context: str | None = None,
+    additional_graph_context: str | None = None,
+    query_explicit_relations: bool | None = None,
+    query_forceful_relations: bool | None = None,
     titles: list[str] | None = None,
     acl: list[str] | None = None,
     follow_forceful_relations: bool | None = None,
@@ -534,8 +557,10 @@ def do_query(
     kinds, so it is dropped there instead of refused."""
     if not query.strip():
         print_error("Query cannot be empty.")
-    if kind and kind not in VALID_KINDS:
-        print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
+    if kind is not None and kind not in VALID_KINDS | {"all"}:
+        print_error(f"--type/--kind must be one of: all, knowledge, memory. Got '{kind}'.")
+    if recency_bias is None:
+        recency_bias = 0.6
     if mode and mode not in VALID_MODES:
         print_error(f"--mode must be one of: {', '.join(sorted(VALID_MODES))}. Got '{mode}'.")
     if operator and operator not in VALID_OPERATORS:
@@ -559,9 +584,17 @@ def do_query(
             if key not in seen_titles:
                 seen_titles.add(key)
                 clean_titles.append(title)
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    controls = {
+        key: value
+        for key, value in {
+            "query_explicit_relations": query_explicit_relations,
+            "query_forceful_relations": query_forceful_relations,
+            "additional_graph_context": additional_graph_context,
+        }.items()
+        if value is not None
+    }
 
     def run_unified() -> None:
         _refuse_kind_on_unified(None if kind_implied else kind, tid)
@@ -580,6 +613,7 @@ def do_query(
                 titles=clean_titles,
                 acl=acl,
                 follow_forceful_relations=follow_forceful_relations,
+                **controls,
                 database=tid,
                 collection=stid,
             ),
@@ -592,14 +626,9 @@ def do_query(
         run_unified()
         return
 
-    if follow_forceful_relations is not None and layout == LAYOUT_SPLIT:
-        print_error(
-            "--follow-forceful-relations/--no-follow-forceful-relations applies to unified databases only; "
-            f"'{tid}' is a split database."
-        )
     if llm and layout == LAYOUT_SPLIT:
         print_error(f"--llm applies to unified databases only; '{tid}' is a split database and has no llm_prompt.")
-    if layout == LAYOUT_UNKNOWN and (llm or follow_forceful_relations is not None):
+    if layout == LAYOUT_UNKNOWN and llm:
         # Only a unified database takes these, so the request goes out unified.
         run_unified()
         return
@@ -608,7 +637,7 @@ def do_query(
         spinner_msg,
         lambda: wrapper.context.query(
             query=query,
-            kind=kind,
+            kind=kind or "all",
             operator=operator,
             query_by="text" if operator else None,
             max_results=max_results,
@@ -617,6 +646,12 @@ def do_query(
             recency_bias=recency_bias,
             graph_context=graph_context,
             additional_context=additional_context,
+            **controls,
+            **(
+                {"follow_forceful_relations": follow_forceful_relations}
+                if follow_forceful_relations is not None
+                else {}
+            ),
             titles=clean_titles,
             acl=acl,
             database=tid,
@@ -682,8 +717,7 @@ def do_feedback(
             "feedback needs something to record: pass --feedback, --ground-truth-answer, or --ground-truth-source-id."
         )
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
 
     result = _execute(
@@ -744,8 +778,7 @@ def do_ingest_memory(
     """``on_unified`` redoes the write in the unified shape when the layout
     was unknown and the database turned out to be unified; without one, the
     refusal is explained instead."""
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
     what = "a memory (kind) cannot be written to it"
     layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
@@ -784,8 +817,7 @@ def do_ingest_knowledge_text(
     on_unified: Callable[[], None] | None = None,
 ) -> None:
     """``on_unified``: see :func:`do_ingest_memory`."""
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
     what = "knowledge text (kind) cannot be written to it"
     layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
@@ -861,8 +893,7 @@ def do_ingest_knowledge_files(
             opened.append(fh)
             documents.append((p.name, fh, None))
 
-        tid = require_tenant_id(tenant_id)
-        stid = resolve_sub_tenant_id(sub_tenant_id)
+        tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
         wrapper = get_wrapper()
         what = "files are not accepted (text or a conversation only). Extract the text first"
         layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
@@ -1090,8 +1121,7 @@ def do_ingest_unified(
 ) -> None:
     """Ingest one context item into a UNIFIED database: a JSON ``POST
     /context/ingest`` with the ``context`` list, no ``type``, no multipart."""
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     if conversation_file and text is not None:
         print_error("Pass exactly one of --text or --conversation-file.")
     conversation = _load_conversation(conversation_file) if conversation_file else None
@@ -1153,8 +1183,7 @@ def do_list(
     if page_size is not None and (page_size < 1 or page_size > 100):
         print_error(f"--page-size must be between 1 and 100, got {page_size}.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
     layout = _layout(wrapper, tid)
 
@@ -1225,8 +1254,7 @@ def do_inspect(
     if mode not in VALID_FETCH_MODES:
         print_error(f"--mode must be one of: {', '.join(sorted(VALID_FETCH_MODES))}. Got '{mode}'.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
 
     try:
@@ -1290,8 +1318,7 @@ def do_delete(
     if kind is not None and kind not in VALID_KINDS:
         print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
     layout = _layout(wrapper, tid)
     unified_result: list[Any] = []
@@ -1353,8 +1380,7 @@ def do_relations(
     if limit is not None and limit < 1:
         print_error(f"--limit must be at least 1, got {limit}.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
     if _is_unified(wrapper, tid):
         # One corpus: no kind is selected and none is sent.
@@ -1414,8 +1440,7 @@ def do_subgraph(
     if max_sources is not None and max_sources < 1:
         print_error(f"--max-sources must be at least 1, got {max_sources}.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
     if _is_unified(wrapper, tid):
         # One corpus: no kind is selected and none is sent.
@@ -1499,8 +1524,7 @@ def do_ingestion_status(
     if not clean_ids:
         print_error("At least one source ID is required.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
 
     result = _execute(
