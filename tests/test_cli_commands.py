@@ -337,7 +337,7 @@ class TestListInspectDeleteRelationsVerify:
         with _patch_wrapper(w):
             result = runner.invoke(app, ["--output", "json", "delete", "ghost", "--kind", "knowledge", "--yes"])
         assert result.exit_code != 0
-        assert json.loads(result.output)["success"] is False
+        assert json.loads(result.stdout)["success"] is False
 
     def test_relations(self):
         _auth()
@@ -449,7 +449,15 @@ class TestListInspectDeleteRelationsVerify:
         with _patch_wrapper(w):
             result = runner.invoke(app, ["--output", "json", "subgraph", "src_1"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output) == payload
+        assert json.loads(result.stdout) == {
+            **payload,
+            "scope": {
+                "database": "t1",
+                "collection": None,
+                "database_source": "default",
+                "collection_source": "server_default",
+            },
+        }
 
     def test_subgraph_unknown_id_is_an_answer(self):
         _auth()

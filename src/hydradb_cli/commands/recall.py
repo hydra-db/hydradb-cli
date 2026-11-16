@@ -35,6 +35,7 @@ def full_recall(
     _impl.do_query(
         query,
         kind="knowledge",
+        kind_implied=True,
         max_results=max_results,
         mode=mode,
         alpha=alpha,
@@ -69,6 +70,7 @@ def recall_preferences(
     _impl.do_query(
         query,
         kind="memory",
+        kind_implied=True,
         max_results=max_results,
         mode=mode,
         alpha=alpha,
