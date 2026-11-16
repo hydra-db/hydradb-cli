@@ -524,16 +524,16 @@ class _Context(_Resource):
         database: str | None = None,
         collection: str | None = None,
     ) -> tuple[dict, str | None]:
-        """``POST /query`` against a UNIFIED database (PRO-1618).
+        """``POST /query`` against a physical UNIFIED database (PRO-1618).
 
         Never sends ``type``: a unified database has one corpus, and the server
         refuses ``knowledge``/``memory`` there. Unsupported request controls
         use the wrapper's raw transport; published SDK schemas withhold them.
 
-        Returns ``(body, request_id)``. ``body`` is the four-key response
-        (``chunks``, ``graph``, ``forceful_relations``, ``llm_prompt``) as the
-        server sent it: dumped with ``exclude_unset`` so no key the server did
-        not send is added by SDK defaults.
+        Returns ``(body, request_id)``. During rollout, the server can return
+        either the unified body or V2RetrievalResult for the same physical
+        layout. The body keeps its actual wire shape, dumped with
+        ``exclude_unset`` so no key is added by SDK defaults.
         ``request_id`` is lifted from the envelope's ``meta`` for feedback.
         Envelope warnings are preserved alongside the response payload.
         """
@@ -569,7 +569,9 @@ class _Context(_Resource):
             body = envelope
             if isinstance(envelope, dict) and "data" in envelope and {"success", "meta", "error"} & envelope.keys():
                 body = _with_warnings(envelope["data"] or {}, envelope.get("meta"))
-            return body if isinstance(body, dict) else {}, _request_id_of(envelope)
+            if not isinstance(body, dict):
+                raise HydraDBClientError(200, "Malformed query response: expected an object.")
+            return body, _request_id_of(envelope)
         try:
             resp = self._w._sdk.query(**{k: v for k, v in kwargs.items() if v is not None})
         except ParsingError as exc:
@@ -578,7 +580,9 @@ class _Context(_Resource):
             # is still the server's answer: use it as sent, no second request.
             envelope = exc.body if isinstance(exc.body, dict) else None
             body = envelope.get("data") if envelope else None
-            if exc.status_code and 200 <= exc.status_code < 300 and isinstance(body, dict):
+            if exc.status_code and 200 <= exc.status_code < 300:
+                if not isinstance(body, dict):
+                    raise HydraDBClientError(exc.status_code, "Malformed query response: expected an object.") from exc
                 return _with_warnings(body, envelope.get("meta")), _request_id_of(envelope)
             raise translate_sdk_error(exc) from exc
         except (ApiError, httpx.HTTPError) as exc:
@@ -586,7 +590,9 @@ class _Context(_Resource):
         data = getattr(resp, "data", None)
         dump = getattr(data, "model_dump", None)
         body = dump(mode="json", by_alias=True, exclude_unset=True) if callable(dump) else data
-        return _with_warnings(body if isinstance(body, dict) else {}, getattr(resp, "meta", None)), _request_id_of(resp)
+        if not isinstance(body, dict):
+            raise HydraDBClientError(200, "Malformed query response: expected an object.")
+        return _with_warnings(body, getattr(resp, "meta", None)), _request_id_of(resp)
 
     def ingest(
         self,

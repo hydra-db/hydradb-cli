@@ -247,26 +247,48 @@ def _feedback_hint(r: dict) -> str:
 
 
 def _is_unified_query_body(r: dict) -> bool:
-    """Shape detection (contract rule 4).
+    """Validate renderer field shapes and distinguish V2 from unified bodies.
 
-    A unified body carries ``llm_prompt``, a ``graph`` ARRAY and a
-    ``forceful_relations`` ARRAY; a split body carries ``chunk_content``/
-    ``graph_context``. A split body can carry ``graph`` and
-    ``forceful_relations`` too, but as objects (``{paths}``,
-    ``{declared, inferred}``), so both are told apart by type, never by the key
-    being there. Stored logs and split databases keep producing the old shape,
-    so the layout probe alone cannot decide this.
+    Both bodies can carry a string ``llm_prompt``. Only chunk fields and
+    object-versus-array graph/relation fields distinguish the wire shapes.
     """
-    if isinstance(r.get("graph"), list) or isinstance(r.get("forceful_relations"), list):
-        return True
-    if any(
-        isinstance(r.get(key), dict)
-        for key in ("graph", "forceful_relations", "graph_context", "additional_graph_context", "additional_context")
-    ):
-        return False
-    if any(isinstance(chunk, dict) and "chunk_content" in chunk for chunk in r.get("chunks") or []):
-        return False
-    return "llm_prompt" in r
+    if not isinstance(r, dict) or not isinstance(r.get("chunks"), list):
+        print_error("Malformed query response: expected an object with a chunks array.")
+    if r.get("llm_prompt") is not None and not isinstance(r["llm_prompt"], str):
+        print_error("Malformed query response: llm_prompt must be a string.")
+    unified = False
+    v2 = False
+    for key in ("graph", "forceful_relations"):
+        value = r.get(key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            v2 = True
+        elif isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            unified = True
+        else:
+            print_error(f"Malformed query response: {key} must be an object or an array of objects.")
+    if r.get("graph_context") is not None:
+        if not isinstance(r["graph_context"], dict):
+            print_error("Malformed query response: graph_context must be an object.")
+        v2 = True
+    for i, chunk in enumerate(r["chunks"]):
+        if not isinstance(chunk, dict):
+            print_error(f"Malformed query response: chunks[{i}] must be an object.")
+        if not {"content", "context_id", "chunk_content"} & chunk.keys():
+            print_error(f"Malformed query response: chunks[{i}] has no recognized content fields.")
+        unified = unified or "content" in chunk or "context_id" in chunk
+        v2 = v2 or "chunk_content" in chunk
+        for key in ("content", "chunk_content"):
+            if chunk.get(key) is not None and not isinstance(chunk[key], str):
+                print_error(f"Malformed query response: chunks[{i}].{key} must be a string.")
+        for key in ("score", "relevancy_score"):
+            value = chunk.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                print_error(f"Malformed query response: chunks[{i}].{key} must be a number.")
+    if unified and v2:
+        print_error("Malformed query response: mixed unified and V2 field shapes.")
+    return unified
 
 
 def _preview(text: str, limit: int) -> str:
@@ -433,7 +455,7 @@ def _forceful_relations_panel(forceful: list) -> Panel:
 
 
 def _format_unified_query_result(r: dict, request_id: str | None = None):
-    """The four-key unified body (PRO-1618) for a person: ``chunks[]`` as
+    """The unified structured response (PRO-1618) for a person: ``chunks[]`` as
     panels, ``graph[]`` as path tables grouped by ``origin``,
     ``forceful_relations[]`` as a table of what declared relations pulled in
     (no section when there are none), and the feedback hint. ``llm_prompt`` is
@@ -460,29 +482,42 @@ def _format_unified_query_result(r: dict, request_id: str | None = None):
 
 
 def _print_unified_query(body: dict, request_id: str | None, *, llm: bool) -> None:
-    """Print a unified query result with additive CLI scope metadata in JSON.
+    """Print the actual response shape returned for a physical unified database.
     ``--llm`` is the server-built prompt on plain
     stdout (not Rich, which would re-wrap it at the terminal width and read
     bracketed fragments as markup), with the feedback hint on stderr so the
     prompt can be piped; otherwise the structured rendering."""
+    unified = _is_unified_query_body(body)
     if get_output_format() == "json":
+        if request_id:
+            if "request_id" not in body:
+                body = {**body, "request_id": request_id}
+            elif body["request_id"] != request_id:
+                body = {"data": body, "request_id": request_id}
         print_json(body)
         return
+    request_id = request_id or body.get("request_id")
     emit_scope_notice()
     if llm:
-        typer.echo(body.get("llm_prompt") or "")
+        prompt = body.get("llm_prompt")
+        if not isinstance(prompt, str):
+            print_error("Malformed query response: --llm requires a string llm_prompt.")
+        typer.echo(prompt)
         if request_id:
             err_console.print(_feedback_hint({"request_id": request_id}).lstrip("\n"))
         return
-    console.print(_format_unified_query_result(body, request_id))
+    console.print(_format_unified_query_result(body, request_id) if unified else _format_query_result(body, request_id))
 
 
-def _format_query_result(r: dict):
-    if _is_unified_query_body(r):
+def _format_query_result(r: dict, request_id: str | None = None):
+    unified = _is_unified_query_body(r)
+    request_id = request_id if request_id is not None else r.get("request_id")
+    if unified:
         # A unified body reached the split path (a server that does not list a
         # database's layout still answers a type-less query on a unified one
         # in the unified shape). Render it as what it is.
-        return _format_unified_query_result(r, r.get("request_id"))
+        return _format_unified_query_result(r, request_id)
+    hint = _feedback_hint({"request_id": request_id})
     chunks = list(r.get("chunks") or [])
     linked = r.get("additional_graph_context")
     if not isinstance(linked, dict):
@@ -494,7 +529,7 @@ def _format_query_result(r: dict):
             elif isinstance(value, dict):
                 chunks.append(value)
     if not chunks:
-        return "[dim]No relevant results found.[/dim]" + _feedback_hint(r)
+        return "[dim]No relevant results found.[/dim]" + hint
 
     panels: list[Any] = []
     for i, chunk in enumerate(chunks, 1):
@@ -521,7 +556,6 @@ def _format_query_result(r: dict):
     if query_paths:
         panels.append(Text(f"  Graph: {len(query_paths)} entity path(s) found.", style="dim"))
 
-    hint = _feedback_hint(r)
     if hint:
         panels.append(Text.from_markup(hint.lstrip("\n")))
 
@@ -619,7 +653,7 @@ def do_query(
             ),
         )
         body, request_id = outcome if isinstance(outcome, tuple) else (outcome, None)
-        _print_unified_query(body if isinstance(body, dict) else {}, request_id, llm=llm)
+        _print_unified_query(body, request_id, llm=llm)
 
     layout = _layout(wrapper, tid)
     if layout == LAYOUT_UNIFIED:
@@ -960,7 +994,7 @@ def _load_conversation(path: str) -> list[dict[str, Any]]:
         if not isinstance(turn, dict):
             print_error(f"conversation[{i}] must be an object with role and content.")
         role = turn.get("role")
-        if role not in VALID_ROLES:
+        if not isinstance(role, str) or role not in VALID_ROLES:
             print_error(f"conversation[{i}].role must be one of: {', '.join(sorted(VALID_ROLES))}. Got {role!r}.")
         content = turn.get("content")
         if not isinstance(content, str) or not content.strip():

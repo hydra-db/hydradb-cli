@@ -205,7 +205,11 @@ def ingest(
     user_name: str | None = typer.Option(
         None, "--user-name", help="Who is speaking: the user's name (split: memory only; unified: any item)."
     ),
-    infer: bool = typer.Option(True, "--infer/--no-infer", help="Extract insights and build knowledge graph."),
+    infer: bool = typer.Option(
+        True,
+        "--infer/--no-infer",
+        help="Additional memory enrichment; disabling it leaves entity/graph processing enabled.",
+    ),
     markdown: bool = typer.Option(False, "--markdown", help="Treat text as markdown (split memory only)."),
     upsert: bool = typer.Option(True, "--upsert/--no-upsert", help="Update existing items with the same id."),
     conversation_file: str | None = typer.Option(
@@ -221,7 +225,7 @@ def ingest(
     enrich: bool = typer.Option(
         True,
         "--enrich/--no-enrich",
-        help="Unified databases: extract facts and graph relations for the item. --no-infer means the same there.",
+        help="Unified databases: additional memory enrichment; disabling it leaves entity/graph processing enabled. --no-infer means the same there.",
     ),
     instructions: str | None = typer.Option(
         None, "--instructions", help="Unified databases: steer enrichment for this item."
@@ -275,7 +279,7 @@ def ingest(
             print_error(f"Database '{db}' is unified: it has one corpus, so --type/--kind does not apply. Omit it.")
         if markdown:
             print_error("--markdown does not apply on a unified database.")
-        if conversation_file and text:
+        if conversation_file and text is not None:
             print_error("Pass exactly one of --text or --conversation-file.")
         if context_id and source_id and context_id != source_id:
             print_error("--context-id and --source-id name the same thing on a unified database; pass one of them.")

@@ -18,7 +18,11 @@ def add(
     text: str | None = typer.Option(None, "--text", "-t", help="Text to store. Use '-' to read from stdin."),
     tenant_id: str | None = typer.Option(None, "--tenant-id", help="Database. Uses default if not specified."),
     sub_tenant_id: str | None = typer.Option(None, "--sub-tenant-id", help="Collection."),
-    infer: bool = typer.Option(True, "--infer/--no-infer", help="Extract insights and build knowledge graph."),
+    infer: bool = typer.Option(
+        True,
+        "--infer/--no-infer",
+        help="Additional memory enrichment; disabling it leaves entity/graph processing enabled.",
+    ),
     markdown: bool = typer.Option(False, "--markdown", help="Treat the text as markdown content."),
     title: str | None = typer.Option(None, "--title", help="Optional title for the memory."),
     source_id: str | None = typer.Option(None, "--source-id", help="Source identifier to group related memories."),

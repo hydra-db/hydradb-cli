@@ -199,9 +199,9 @@ hydradb -o json list --type memory
 hydradb -o json query "pricing" --type knowledge | jq '.chunks[0].chunk_content'
 ```
 
-The `--output json` shape is a stable, documented contract — the wrapper unwraps
-the SDK response envelope back to the same plain-dict shape, so `jq` pipelines
-keep working across SDK updates.
+The `--output json` shape is a documented contract: SDK response fields are
+preserved across SDK updates. CLI metadata is additive, with the bounded
+collision envelopes described below.
 
 ---
 
@@ -226,11 +226,22 @@ piped prompt intact. Overrides apply only to that command, not your saved config
 Server warnings also go to stderr and remain in JSON responses as `warnings`
 (or `response_warnings` if the payload already owns `warnings`).
 Warning codes and messages are passed through as opaque server notices; the CLI
-does not compute default-inference or enrichment counts. Envelope `request_id`
-metadata is also retained without replacing a payload-owned `request_id`.
+does not compute default-inference or enrichment counts.
 
-The JSON notice never replaces backend-owned fields. Its location depends on
-which keys the backend response already contains:
+For a query on a unified database, an available envelope `request_id` is added
+when the payload has no such key. An equal payload-owned ID needs no extra envelope.
+A request-ID collision
+(a different payload-owned value, including `null`, an empty string, or `false`)
+instead produces an outer object with `data` containing the entire original
+response and `request_id` containing the real envelope ID. The client notice is
+then added as outer `scope`; backend `scope`, `cli_scope`, `data`, and warning
+fields stay inside `data`. Human and `--llm` feedback hints always use the real
+envelope ID when available. If the envelope has no ID, the CLI preserves the
+payload without inventing one or adding a request-ID collision envelope.
+
+Without a request-ID collision, the scope-only rules are unchanged. The JSON
+notice never replaces backend-owned fields; its location depends on which keys
+the response already contains:
 
 | Backend response keys | JSON output |
 |-----------------------|-------------|
@@ -242,7 +253,8 @@ Key presence counts even when a value is `null`. In the envelope case, any
 backend `data`, warning fields, and fallback keys remain unchanged inside the
 outer `data`. The client notice always has the same fields: `database`,
 `collection`, `database_source`, and `collection_source`. Without a client notice,
-the response is printed unchanged.
+no scope fields or scope-only envelope are added; query request-ID handling still
+applies.
 
 ---
 
@@ -273,7 +285,12 @@ hydradb query "Who owns the rollout?" --title "Q3 Roadmap.md" --title "Smith, Jo
 ```
 
 On a **unified database** (see `database create --type unified`) the CLI never
-sends `type`, and the answer is the four-key unified body: `chunks[]`
+sends `type`. During server rollout, the answer may still be V2, with
+`chunks[].chunk_content` and object-valued graph/relation fields, or the unified
+shape below. Both can carry a string `llm_prompt`; rendering follows the actual
+response body, not the physical layout or the prompt's presence.
+
+The unified body contains `chunks[]`
 (`context_id`, `score`, `content`, `enrichment` as a plain string and
 `enrichment_kind` beside it, the declared category, either one omitted when
 empty), `graph[]` (`origin`, `path_summary` plus triplets),
@@ -305,11 +322,14 @@ hydradb --output json query "What plan is John on?" | jq '.chunks[].context_id'
 hydradb query "refund window" --no-follow-forceful-relations
 ```
 
-Every query prints a `request_id`. That is the only key `feedback` correlates
-on, so keep it if you intend to rate the answer:
+The server's envelope `request_id` is the only ID `feedback` correlates on; a
+different payload-owned ID must not replace it. For the unified-database JSON
+shapes above, read the real ID from `.request_id`, or from `.data.request_id` for
+the scope-only collision envelope. This extraction handles both bounded envelopes
+and the normal flat body when the server supplies an envelope ID:
 
 ```bash
-hydradb --output json query "contract terms" | jq -r .request_id
+hydradb --output json query "contract terms" | jq -r '.request_id // .data.request_id'
 ```
 
 ---
@@ -359,7 +379,7 @@ There is no content classifier, and disabling enrichment does not select a corpu
 | `--title` | Optional title |
 | `--source-id` | Client-assigned source identifier (the `--context-id` on a unified database) |
 | `--user-name` | Who is speaking (split: memory only; unified: any item, sent as `user_name`) |
-| `--infer` / `--no-infer` | Extract insights and build the knowledge graph (default on) |
+| `--infer` / `--no-infer` | Additional memory enrichment (default on); disabling it leaves entity/graph processing enabled |
 | `--markdown` | Treat text as markdown (split memory only) |
 | `--upsert` / `--no-upsert` | Update existing items with the same id (default on) |
 
@@ -384,7 +404,7 @@ These options apply there and are refused on a split database:
 |--------|-------------|
 | `--conversation-file` | Path to a JSON list of `{role, content}` turns (roles `user`, `assistant`, `system`); name the user with `--user-name` |
 | `--context-id` | Caller-assigned id for the item (server-generated when omitted) |
-| `--enrich` / `--no-enrich` | Extract facts and graph relations for the item (default on; `--no-infer` means the same) |
+| `--enrich` / `--no-enrich` | Additional memory enrichment (default on; `--no-infer` means the same); disabling it leaves entity/graph processing enabled |
 | `--happened-at` | The event date the item is about, `YYYY-MM-DD` |
 | `--attributes` | Declared, filterable attributes as a JSON object |
 | `--custom-attributes` | Free-form attributes as a JSON object |

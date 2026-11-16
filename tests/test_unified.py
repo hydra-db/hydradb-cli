@@ -495,6 +495,7 @@ class TestUnifiedQueryCommand:
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout) == {
             **UNIFIED_BODY,
+            "request_id": "req-1",
             "scope": {
                 "database": "t1",
                 "collection": None,
@@ -520,6 +521,7 @@ class TestUnifiedQueryCommand:
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout) == {
             **UNIFIED_BODY,
+            "request_id": "req-1",
             "scope": {
                 "database": "t1",
                 "collection": None,
@@ -621,6 +623,7 @@ class TestUnifiedQueryCommand:
         assert "req-7" in outputs["llm"].stderr
         assert json.loads(outputs["json"].stdout) == {
             **UNIFIED_BODY,
+            "request_id": "req-7",
             "scope": {
                 "database": "db_test",
                 "collection": None,
@@ -644,6 +647,7 @@ class TestUnifiedQueryCommand:
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout) == {
             **UNIFIED_BODY,
+            "request_id": "req-9",
             "scope": {
                 "database": "db_test",
                 "collection": "col_test",

@@ -43,11 +43,11 @@ class Recorder:
         self.content_type = request.headers.get("content-type", "")
         self.params = dict(request.url.params)
         self.body = request.content
-        payload = (
-            {"database": "db_test", "status": "accepted"}
-            if request.url.path in ("/databases", "/databases/status", "/databases/stats")
-            else {}
-        )
+        payload = {}
+        if request.url.path in ("/databases", "/databases/status", "/databases/stats"):
+            payload = {"database": "db_test", "status": "accepted"}
+        elif request.url.path == "/query":
+            payload = {"chunks": []}
         return httpx.Response(200, json={"success": True, "data": payload, "meta": {}})
 
     # -- extraction helpers ---------------------------------------------------
