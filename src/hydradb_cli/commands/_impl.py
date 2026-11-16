@@ -571,7 +571,7 @@ def do_query(
     max_results: int = 10,
     mode: str | None = None,
     alpha: float | None = None,
-    recency_bias: float | None = 0.6,
+    recency_bias: float | None = None,
     graph_context: bool | None = None,
     additional_context: str | None = None,
     additional_graph_context: str | None = None,
@@ -593,8 +593,6 @@ def do_query(
         print_error("Query cannot be empty.")
     if kind is not None and kind not in VALID_KINDS | {"all"}:
         print_error(f"--type/--kind must be one of: all, knowledge, memory. Got '{kind}'.")
-    if recency_bias is None:
-        recency_bias = 0.6
     if mode and mode not in VALID_MODES:
         print_error(f"--mode must be one of: {', '.join(sorted(VALID_MODES))}. Got '{mode}'.")
     if operator and operator not in VALID_OPERATORS:
@@ -671,7 +669,7 @@ def do_query(
         spinner_msg,
         lambda: wrapper.context.query(
             query=query,
-            kind=kind or "all",
+            kind=kind,
             operator=operator,
             query_by="text" if operator else None,
             max_results=max_results,

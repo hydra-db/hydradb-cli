@@ -132,7 +132,7 @@ def _query_controls(
     # error, so a canonical name alone would be dropped there. Renamed servers
     # take the canonical name when both are present.
     for canonical, legacy in (
-        ("query_explicit_relations", "follow_forceful_relations"),
+        ("query_explicit_relations", "query_forceful_relations"),
         ("additional_graph_context", "additional_context"),
     ):
         if canonical in controls:
@@ -429,12 +429,12 @@ class _Context(_Resource):
         self,
         *,
         query: str,
-        kind: str | None = "all",
+        kind: str | None = None,
         operator: str | None = None,
         max_results: int | None = None,
         mode: str | None = None,
         alpha: float | None = None,
-        recency_bias: float | None = 0.6,
+        recency_bias: float | None = None,
         graph_context: bool | None = None,
         additional_context: str | None = None,
         additional_graph_context: str | None = None,
@@ -523,7 +523,7 @@ class _Context(_Resource):
         max_results: int | None = None,
         mode: str | None = None,
         alpha: float | None = None,
-        recency_bias: float | None = 0.6,
+        recency_bias: float | None = None,
         graph_context: bool | None = None,
         additional_context: str | None = None,
         additional_graph_context: str | None = None,

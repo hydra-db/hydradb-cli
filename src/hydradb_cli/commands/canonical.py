@@ -60,14 +60,20 @@ def _resolve_text_input(text: str | None) -> str:
 def query(
     query_text: str = typer.Argument(metavar="QUERY", help="Search query."),
     type_: str | None = typer.Option(
-        None, "--type", help="Split corpus: 'all' (default), 'memory', or 'knowledge'. Omitted on unified databases."
+        None,
+        "--type",
+        help="Split corpus: 'all', 'memory', or 'knowledge'; omit for the server default. Refused on unified databases.",
     ),
     kind: str | None = typer.Option(None, "--kind", help="Deprecated alias for --type."),
     operator: str | None = typer.Option(None, "--operator", help="Keyword operator: 'or', 'and', or 'phrase'."),
     max_results: int = typer.Option(10, "--max-results", "-n", help="Maximum number of results (1-50)."),
     mode: str | None = typer.Option(None, "--mode", "-m", help="Retrieval mode: 'fast' or 'thinking'."),
     alpha: float | None = typer.Option(None, "--alpha", help="Hybrid search alpha (0.0=keyword, 1.0=semantic)."),
-    recency_bias: float | None = typer.Option(0.6, "--recency-bias", help="Preference for newer content (0.0-1.0)."),
+    recency_bias: float | None = typer.Option(
+        None,
+        "--recency-bias",
+        help="Preference for newer content (0.0-1.0). Omit for the server default.",
+    ),
     graph_context: bool | None = typer.Option(
         None, "--graph-context/--no-graph-context", help="Include knowledge graph relations."
     ),

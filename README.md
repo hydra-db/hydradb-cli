@@ -267,12 +267,12 @@ Retrieve knowledge or memories — the single entry point for search.
 
 | Option | Description |
 |--------|-------------|
-| `--type` | Split databases: `all` (default), `memory` or `knowledge`. Omit on unified databases; every explicit selector is refused there |
+| `--type` | Split databases: `all`, `memory` or `knowledge`; omit it for the server default. Omit on unified databases; every explicit selector is refused there |
 | `--operator` | Keyword operator: `or`, `and`, `phrase` |
 | `--max-results` / `-n` | Maximum results, 1–50 (default `10`) |
 | `--mode` / `-m` | Retrieval mode: `fast` or `thinking` |
 | `--alpha` | Hybrid search weight (`0.0` keyword → `1.0` semantic) |
-| `--recency-bias` | Preference for newer content (`0.0`–`1.0`, default `0.6`) |
+| `--recency-bias` | Preference for newer content (`0.0`–`1.0`); omit it for the server default |
 | `--graph-context` / `--no-graph-context` | Include knowledge graph relations |
 | `--additional-graph-context` | A string hint to guide retrieval; distinct from the linked-chunk map in a split response |
 | `--title` | Exact document title to search inside; repeat the flag for multiple titles |
@@ -319,7 +319,7 @@ named response map is read independently, canonical first and legacy second.
 Human output shows its chunks after the numbered results, each labelled `linked`,
 because they come from graph links rather than ranking.
 A canonical name always travels with its legacy twin carrying the same value
-(`query_explicit_relations` with `follow_forceful_relations`,
+(`query_explicit_relations` with `query_forceful_relations`,
 `additional_graph_context` with `additional_context`): servers that predate the
 rename ignore the canonical name silently, and renamed servers prefer it.
 

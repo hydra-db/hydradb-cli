@@ -305,7 +305,6 @@ class TestUnifiedQueryWrapper:
             "query": "pro plan",
             "operator": "and",
             "max_results": 5,
-            "recency_bias": 0.6,
             "mode": "fast",
             "query_by": "text",
             "titles": ["Q3"],
@@ -317,7 +316,7 @@ class TestUnifiedQueryWrapper:
         seen = []
         w = _real_wrapper(_sdk_server({"/query": (200, {"success": True, "data": EMPTY_BODY, "meta": {}})}, seen))
         body, request_id = w.context.query_unified(query="q")
-        assert seen[0][2] == {"database": "db_test", "collection": "col_test", "query": "q", "recency_bias": 0.6}
+        assert seen[0][2] == {"database": "db_test", "collection": "col_test", "query": "q"}
         assert body == EMPTY_BODY
         assert request_id is None
 

@@ -1,3 +1,4 @@
+import email
 import json
 from unittest.mock import patch
 
@@ -117,7 +118,8 @@ def test_canonical_query_names_are_sent_with_their_legacy_twins(layout):
     assert result.exit_code == 0, result.output
     sent = json.loads(seen["/query"][0].content)
     assert sent["additional_graph_context"] == sent["additional_context"] == "hint"
-    assert sent["query_explicit_relations"] is False and sent["follow_forceful_relations"] is False
+    assert sent["query_explicit_relations"] is False and sent["query_forceful_relations"] is False
+    assert "follow_forceful_relations" not in sent
 
 
 def test_legacy_query_names_alone_are_sent_unchanged():
@@ -138,7 +140,7 @@ def test_layout_probe_refusal_falls_back_to_split_instead_of_failing(status):
     result, seen = invoke(["query", "x"], probe_status=status)
     assert result.exit_code == 0, result.output
     assert f"HTTP {status}" in result.stderr and "sending the split request" in flat(result.stderr)
-    assert json.loads(seen["/query"][0].content)["type"] == "all"
+    assert json.loads(seen["/query"][0].content) == MAIN_SPLIT_QUERY
 
 
 def test_layout_probe_401_still_ends_the_command():
@@ -234,3 +236,66 @@ def test_missing_database_error_names_list_and_create(argv):
     assert result.exit_code == 1, result.output
     message = flat(result.stderr)
     assert "hydradb database list" in message and "hydradb database create <name>" in message
+
+
+# Existing-user rule: on a split database an untyped call sends exactly what main sends.
+
+MAIN_SPLIT_QUERY = {"query": "x", "database": "db", "collection": "col", "max_results": 10}
+MAIN_SPLIT_INGEST = {
+    "database": "db",
+    "collection": "col",
+    "type": "memory",
+    "upsert": "true",
+    "memories": [{"text": "note one", "infer": True, "is_markdown": False}],
+}
+
+
+def form_fields(request: httpx.Request) -> dict:
+    message = email.message_from_bytes(
+        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
+    )
+    return {
+        part.get_param("name", header="content-disposition"): part.get_payload(decode=True).decode()
+        for part in message.get_payload()
+    }
+
+
+def test_untyped_split_query_sends_the_main_body():
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x"])
+    assert result.exit_code == 0, result.output
+    sent = json.loads(seen["/query"][0].content)
+    assert sent == MAIN_SPLIT_QUERY
+    assert "type" not in sent and "recency_bias" not in sent
+
+
+def test_untyped_split_ingest_sends_the_main_body():
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["ingest", "--text", "note one"])
+    assert result.exit_code == 0, result.output
+    fields = form_fields(seen["/context/ingest"][0])
+    fields["memories"] = json.loads(fields["memories"])
+    assert fields == MAIN_SPLIT_INGEST
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--type", "all"], {"type": "all"}),
+        (["--recency-bias", "0.6"], {"recency_bias": 0.6}),
+        (["--recency-bias", "0"], {"recency_bias": 0}),
+    ],
+)
+def test_split_query_sends_explicit_type_and_recency_as_given(argv, expected):
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x", *argv])
+    assert result.exit_code == 0, result.output
+    assert json.loads(seen["/query"][0].content) == {**MAIN_SPLIT_QUERY, **expected}
+
+
+@pytest.mark.parametrize("argv, expected", [([], {}), (["--recency-bias", "0.2"], {"recency_bias": 0.2})])
+def test_unified_query_leaves_recency_to_the_server_unless_passed(argv, expected):
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x", *argv], layout="unified")
+    assert result.exit_code == 0, result.output
+    assert json.loads(seen["/query"][0].content) == {**MAIN_SPLIT_QUERY, **expected}

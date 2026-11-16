@@ -89,8 +89,8 @@ def test_default_query_and_scope_switch_are_machine_readable():
             "collection_source": "default",
         }
         assert body["warnings"] == [WARNING]
-        assert w.context.query.call_args.kwargs["kind"] == "all"
-        assert w.context.query.call_args.kwargs["recency_bias"] == 0.6
+        assert w.context.query.call_args.kwargs["kind"] is None
+        assert w.context.query.call_args.kwargs["recency_bias"] is None
         result = runner.invoke(app, ["-o", "json", "query", "x", "--database", "other", "--collection", "other-col"])
         assert "scope" not in json.loads(result.stdout)
         assert w.context.query.call_args.kwargs["database"] == "other"
@@ -219,10 +219,9 @@ def test_wire_alias_precedence_and_unsupported_fields_use_raw(unified):
             context="oldest",
         )
     sent = post.call_args.kwargs["json"]
-    assert sent["query_explicit_relations"] is sent["follow_forceful_relations"] is False
+    assert sent["query_explicit_relations"] is sent["query_forceful_relations"] is False
     assert sent["additional_graph_context"] == sent["additional_context"] == ""
-    assert not {"query_forceful_relations", "context"} & sent.keys()
-    assert ("type" not in sent) if unified else sent["type"] == "all"
+    assert not {"follow_forceful_relations", "context", "type", "recency_bias"} & sent.keys()
     w._sdk.query.assert_not_called()
     assert (result[0] if unified else result)["warnings"] == [WARNING]
 
@@ -439,7 +438,7 @@ def test_legacy_wire_aliases_retain_false_and_empty_string(controls, expected):
         "hydradb_cli.hydra.client.httpx.post", side_effect=httpx.Client(transport=httpx.MockTransport(handler)).post
     ):
         w.context.query(query="x", **controls)
-    assert seen == [{"query": "x", "database": "db", "type": "all", "recency_bias": 0.6, **expected}]
+    assert seen == [{"query": "x", "database": "db", **expected}]
 
 
 def test_missing_app_knowledge_sdk_field_uses_multipart_bridge_and_keeps_id():
