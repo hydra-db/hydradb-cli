@@ -10,11 +10,15 @@ to the SDK directly.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import httpx
+import typer
 from rich.console import Group
 from rich.markup import escape
 from rich.panel import Panel
@@ -22,13 +26,25 @@ from rich.table import Table
 from rich.text import Text
 
 from hydradb_cli.hydra import HydraDBClientError
-from hydradb_cli.output import make_kv_table, make_table, print_error, print_result, spinner
+from hydradb_cli.hydra.client import LAYOUT_SPLIT, LAYOUT_UNIFIED
+from hydradb_cli.output import (
+    console,
+    emit_scope_notice,
+    err_console,
+    get_output_format,
+    make_kv_table,
+    make_table,
+    print_error,
+    print_json,
+    print_result,
+    spinner,
+)
 from hydradb_cli.utils.common import (
     get_wrapper,
     handle_api_error,
     handle_network_error,
     require_tenant_id,
-    resolve_sub_tenant_id,
+    resolve_context_scope,
     validate_range,
 )
 
@@ -41,6 +57,18 @@ VALID_RATINGS = {"positive", "negative", "neutral"}
 # "agnet" is worth catching before it costs one.
 VALID_SOURCES = {"user", "agent"}
 VALID_FETCH_MODES = {"content", "url", "both"}
+# Unified ingest (PRO-1618): the context_category labels and conversation roles
+# the server accepts. Validated locally for the same reason --rating is.
+VALID_CATEGORIES = {"auto", "user_preference", "business_knowledge", "decision_trace"}
+VALID_ROLES = {"user", "assistant", "system"}
+# happened_at is a calendar date, YYYY-MM-DD only: no time, no zone.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# The server's per-item caps on a unified ingest (hydradb-application#1657),
+# checked locally so an item it would refuse is named before the round trip.
+UNIFIED_MAX_TEXT_BYTES = 1 << 20
+UNIFIED_MAX_TITLE_BYTES = 1024
+UNIFIED_MAX_INSTRUCTIONS_CHARS = 4000
+UNIFIED_MAX_CONTEXT_ID_CHARS = 100
 
 _STATUS_LABELS = {
     "queued": "queued",
@@ -71,6 +99,133 @@ def _execute(spinner_msg: str, call: Callable[[], Any]) -> Any:
         handle_network_error(e)
 
 
+# ── storage layout (PRO-1618) ────────────────────────────────────────────────
+
+
+#: The layout probe could not answer (network, timeout, or any HTTP failure
+#: but 401). The command then goes out in the split shape, which is what every
+#: database predating PRO-1618 takes and what the CLI sent before layouts
+#: existed, and is redone in the unified shape if the database refuses it as
+#: unified.
+LAYOUT_UNKNOWN = "unknown"
+
+
+def _layout(wrapper: Any, database: str) -> str:
+    """``unified``, ``split`` or ``unknown`` for ``database``.
+
+    One memoised ``GET /databases`` probe per wrapper. A successful probe that
+    does not list ``database`` reads as split, which is what every
+    pre-PRO-1618 database is. A failed probe reads as unknown, with a warning
+    on stderr, except 401: a rejected key fails the command's own call too, so
+    that one is reported. A key may be allowed the command yet refused
+    ``GET /databases`` (403, 404), and that must not cost it the command.
+    Compared by value so a mocked wrapper (whose ``layout`` returns a
+    MagicMock) reads as split. Every command branches on THIS, never on a
+    request flag: a unified database never receives ``type``, and a split one
+    keeps every existing call as is.
+    """
+    try:
+        return LAYOUT_UNIFIED if wrapper.databases.layout(database) == LAYOUT_UNIFIED else LAYOUT_SPLIT
+    except HydraDBClientError as e:
+        if e.status_code == 401:
+            handle_api_error(e)
+        reason = f"HTTP {e.status_code}" if e.status_code else "no response"
+    except httpx.RequestError as e:
+        reason = type(e).__name__
+    err_console.print(
+        f"  [hydra.warning]![/hydra.warning] Could not check whether '{escape(database)}' is split or unified "
+        f"({escape(reason)}); sending the split request, and redoing it as unified if the database says it is."
+    )
+    return LAYOUT_UNKNOWN
+
+
+def _is_unified(wrapper: Any, database: str) -> bool:
+    """Whether ``database`` is known to be unified (see :func:`_layout`)."""
+    return _layout(wrapper, database) == LAYOUT_UNIFIED
+
+
+def database_layout(tenant_id: str | None) -> tuple[str, str]:
+    """The database a command is about to touch and its layout: ``unified``, ``split`` or ``unknown``."""
+    tid = require_tenant_id(tenant_id)
+    return tid, _layout(get_wrapper(), tid)
+
+
+def _refused_as_unified(e: HydraDBClientError) -> bool:
+    """The server's answer to a split-shaped call on a unified database.
+
+    Either a refusal (400 ``CORPUS_TYPE_UNSUPPORTED``; the SDK path keeps only
+    the message, so that is matched too) or, for a type-less query, a 200
+    carrying the unified body, which the SDK's split response model cannot
+    parse."""
+    detail = e.detail or ""
+    if e.status_code == 400:
+        return "CORPUS_TYPE_UNSUPPORTED" in detail or "is not valid on a unified database" in detail
+    return e.status_code == 200 and "llm_prompt" in detail
+
+
+def _execute_or_unified(
+    spinner_msg: str,
+    call: Callable[[], Any],
+    layout: str,
+    database: str,
+    on_unified: Callable[[], None],
+) -> Any:
+    """:func:`_execute`, except that when the layout is unknown and the
+    database refuses the split call as unified, ``on_unified`` runs instead
+    (it redoes the command in the unified shape, or explains why it cannot)
+    and :data:`UNIFIED_DONE` is returned. With a known layout this is exactly
+    :func:`_execute`."""
+    if layout != LAYOUT_UNKNOWN:
+        return _execute(spinner_msg, call)
+    try:
+        with spinner(spinner_msg):
+            return call()
+    except HydraDBClientError as e:
+        if not _refused_as_unified(e):
+            handle_api_error(e)
+    except httpx.RequestError as e:
+        handle_network_error(e)
+    err_console.print(f"  [dim]'{escape(database)}' is unified; redoing the request in the unified shape.[/dim]")
+    on_unified()
+    return UNIFIED_DONE
+
+
+#: Returned by :func:`_execute_or_unified` when the unified redo ran.
+UNIFIED_DONE = object()
+
+
+def _refuse_kind_on_unified(kind: str | None, database: str) -> None:
+    """A unified database has one corpus, so there is no kind to select.
+
+    The server refuses ``knowledge``/``memory`` there and the contract says
+    never to send ``type`` at all. Refused locally, naming the rule, rather
+    than silently swapped for something the user did not ask for.
+    """
+    if kind:
+        print_error(
+            f"Database '{database}' is unified: it has one corpus, so a kind ('{kind}') cannot be selected. "
+            "Re-run without --kind or --type."
+        )
+
+
+def _refuse_split_write_on_unified(wrapper: Any, database: str, layout: str | None, what: str) -> str:
+    """The split ingest shapes (``memories``/``app_knowledge``/``documents``
+    with ``type``) are refused by a unified database. Probed here unless the
+    caller already resolved the layout, so the deprecated aliases are covered.
+    Returns the layout (``split`` or ``unknown``) the write goes out under."""
+    resolved = layout if layout is not None else _layout(wrapper, database)
+    if resolved == LAYOUT_UNIFIED:
+        _refuse_split_write(database, what)
+    return resolved
+
+
+def _refuse_split_write(database: str, what: str) -> None:
+    print_error(
+        f"Database '{database}' is unified: {what}. "
+        "Use 'hydradb ingest --text ...' or 'hydradb ingest --conversation-file ...' (no --kind)."
+    )
+
+
 # ── query ────────────────────────────────────────────────────────────────────
 
 
@@ -87,41 +242,324 @@ def _feedback_hint(r: dict) -> str:
     return f'\n[dim]request_id: {request_id}  ·  rate it: hydradb feedback {request_id} --feedback "..."[/dim]'
 
 
-def _format_query_result(r: dict):
-    chunks = r.get("chunks") or []
-    if not chunks:
-        return "[dim]No relevant results found.[/dim]" + _feedback_hint(r)
+def _is_unified_query_body(r: dict) -> bool:
+    """Validate renderer field shapes and distinguish V2 from unified bodies.
+
+    Both bodies can carry a string ``llm_prompt``. Only chunk fields and
+    object-versus-array graph/relation fields distinguish the wire shapes.
+    """
+    if not isinstance(r, dict) or not isinstance(r.get("chunks"), list):
+        print_error("Malformed query response: expected an object with a chunks array.")
+    if r.get("llm_prompt") is not None and not isinstance(r["llm_prompt"], str):
+        print_error("Malformed query response: llm_prompt must be a string.")
+    unified = False
+    v2 = False
+    for key in ("graph", "forceful_relations"):
+        value = r.get(key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            v2 = True
+        elif isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            unified = True
+        else:
+            print_error(f"Malformed query response: {key} must be an object or an array of objects.")
+    if r.get("graph_context") is not None:
+        if not isinstance(r["graph_context"], dict):
+            print_error("Malformed query response: graph_context must be an object.")
+        v2 = True
+    for i, chunk in enumerate(r["chunks"]):
+        if not isinstance(chunk, dict):
+            print_error(f"Malformed query response: chunks[{i}] must be an object.")
+        if not {"content", "context_id", "chunk_content"} & chunk.keys():
+            print_error(f"Malformed query response: chunks[{i}] has no recognized content fields.")
+        unified = unified or "content" in chunk or "context_id" in chunk
+        v2 = v2 or "chunk_content" in chunk
+        for key in ("content", "chunk_content"):
+            if chunk.get(key) is not None and not isinstance(chunk[key], str):
+                print_error(f"Malformed query response: chunks[{i}].{key} must be a string.")
+        for key in ("score", "relevancy_score"):
+            value = chunk.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                print_error(f"Malformed query response: chunks[{i}].{key} must be a number.")
+    if unified and v2:
+        print_error("Malformed query response: mixed unified and V2 field shapes.")
+    return unified
+
+
+def _preview(text: str, limit: int) -> str:
+    return text[:limit] + "..." if len(text) > limit else text
+
+
+def _pct(score: Any) -> str:
+    return f"{score:.0%}" if isinstance(score, (int, float)) and not isinstance(score, bool) else ""
+
+
+def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
+    """One ``chunks[]`` item: context_id, score, content, enrichment and
+    enrichment_kind, temporal facts. ``enrichment`` is a plain string and
+    ``enrichment_kind`` its sibling (the declared context_category); either
+    can be absent, and a kind with no enrichment is still shown. Content and
+    enrichment are shown whole, never trimmed (the unified answer is not
+    compacted anywhere). Content is API data, so it is rendered as plain Text
+    and never parsed as markup."""
+    score = _pct(chunk.get("score"))
+    score_str = f" • {score}" if score else ""
+    context_id = chunk.get("context_id") or ""
+    id_str = f" • {escape(str(context_id))}" if context_id else ""
+    body: list[Any] = [Text(chunk.get("content") or "")]
+    enrichment = chunk.get("enrichment")
+    enrichment = enrichment if isinstance(enrichment, str) else ""
+    kind = chunk.get("enrichment_kind")
+    kind = kind if isinstance(kind, str) else ""
+    if enrichment or kind:
+        head = f"enrichment ({kind})" if kind else "enrichment"
+        body.append(Text.assemble((f"{head}: " if enrichment else head, "dim"), enrichment))
+    for fact in chunk.get("temporal") or []:
+        if isinstance(fact, dict):
+            span = " to ".join(str(x) for x in (fact.get("start_date"), fact.get("end_date")) if x)
+            body.append(
+                Text.assemble(("temporal: ", "dim"), fact.get("content") or "", (f" [{span}]" if span else "", "dim"))
+            )
+    return Panel(
+        Group(*body),
+        title=f"[bold]{label}[/bold]{score_str}{id_str}",
+        title_align="left",
+        border_style="cyan",
+        padding=(0, 1),
+    )
+
+
+#: ``graph[].origin`` (PRO-1618): which retrieval lane found a path.
+#: ``query_path`` was grown from the entities in the query; ``chunk_relation``
+#: is the neighbourhood of a chunk that ranked.
+_ORIGIN_QUERY_PATH = "query_path"
+_ORIGIN_CHUNK_RELATION = "chunk_relation"
+
+
+def _list_field(r: dict, key: str) -> list:
+    """``r[key]`` when it is a list, else ``[]``. The unified keys are read by
+    type, never by presence: a split body has a ``graph`` and a
+    ``forceful_relations`` too, but as objects."""
+    value = r.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _chunk_labels(chunks: list, forceful: list) -> dict[str, tuple[str, str]]:
+    """``chunk_id -> (label, context_id)`` for every chunk the body returned:
+    ``1``, ``2``... for ``chunks[]`` and ``R1``, ``R2``... for
+    ``forceful_relations[].chunk``, the labels ``llm_prompt`` cites them by.
+    First write wins, as on the server: a chunk that is both a result and a
+    forceful relation is cited as the result. This is how a graph hop is tied
+    to its chunk and context: by ``relation.chunk_id``, never by parsing it."""
+    labels: dict[str, tuple[str, str]] = {}
+    entries = [(str(i), chunk) for i, chunk in enumerate(chunks, 1)]
+    entries += [(f"R{i}", rel.get("chunk") or {}) for i, rel in enumerate(forceful, 1)]
+    for label, chunk in entries:
+        chunk_id = chunk.get("chunk_id")
+        if chunk_id and chunk_id not in labels:
+            labels[chunk_id] = (label, chunk.get("context_id") or "")
+    return labels
+
+
+def _hop_chunk(triplet: dict, labels: dict[str, tuple[str, str]]) -> tuple[str, str] | None:
+    return labels.get((triplet.get("relation") or {}).get("chunk_id") or "")
+
+
+def _hop_line(triplet: dict, labels: dict[str, tuple[str, str]], *, cite: bool) -> str:
+    src = (triplet.get("source") or {}).get("name") or "?"
+    predicate = (triplet.get("relation") or {}).get("predicate") or "related to"
+    tgt = (triplet.get("target") or {}).get("name") or "?"
+    line = f"{src} -> {predicate} -> {tgt}"
+    hit = _hop_chunk(triplet, labels) if cite else None
+    return f"{line} [{hit[0]}]" if hit else line
+
+
+def _graph_panels(graph: list, labels: dict[str, tuple[str, str]]) -> list[Panel]:
+    """``graph[]`` grouped by ``origin``, the way the split body kept
+    ``query_paths`` and ``chunk_relations`` apart.
+
+    Query paths are listed with each hop citing the returned chunk it was
+    extracted from, when there is one. Chunk relations are listed under the
+    chunk they hang under: every hop's ``relation.chunk_id`` is that chunk.
+    A path with no known origin is still shown, in a group of its own, rather
+    than guessed into one. ``P`` labels are positions in ``graph[]``, which is
+    what ``llm_prompt`` numbers paths by.
+    """
+    query_rows: list[list[str]] = []
+    chunk_rows: list[list[str]] = []
+    other_rows: list[list[str]] = []
+    for i, path in enumerate(graph, 1):
+        if not isinstance(path, dict):
+            continue
+        triplets = [t for t in path.get("triplets") or [] if isinstance(t, dict)]
+        summary = path.get("path_summary") or ""
+        origin = path.get("origin")
+        if origin == _ORIGIN_CHUNK_RELATION:
+            under: list[str] = []
+            for triplet in triplets:
+                hit = _hop_chunk(triplet, labels)
+                cell = f"[{hit[0]}] {hit[1]}".rstrip() if hit else ""
+                if cell and cell not in under:
+                    under.append(cell)
+            hops = "\n".join(_hop_line(t, labels, cite=False) for t in triplets)
+            chunk_rows.append([f"P{i}", "\n".join(under), summary, hops])
+            continue
+        hops = "\n".join(_hop_line(t, labels, cite=True) for t in triplets)
+        (query_rows if origin == _ORIGIN_QUERY_PATH else other_rows).append([f"P{i}", summary, hops])
+
+    groups = (
+        (query_rows, "query path(s)", ("#", "Path", "Triplets")),
+        (chunk_rows, "chunk relation path(s)", ("#", "Chunk", "Path", "Triplets")),
+        (other_rows, "path(s) with no known origin", ("#", "Path", "Triplets")),
+    )
+    return [
+        Panel(
+            make_table(*columns, rows=rows),
+            title=f"[bold cyan]/// Graph: {len(rows)} {what}[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+        for rows, what, columns in groups
+        if rows
+    ]
+
+
+def _forceful_relations_panel(forceful: list) -> Panel:
+    """``forceful_relations[]``: chunks in the result because the caller
+    declared a relation at ingest, with the declared edge (``via``) that
+    pulled each one in. ``R`` labels match ``llm_prompt``'s."""
+    rows = []
+    for i, rel in enumerate(forceful, 1):
+        via = rel.get("via") or {}
+        chunk = rel.get("chunk") or {}
+        rows.append(
+            [
+                f"R{i}",
+                via.get("from") or "",
+                via.get("to") or chunk.get("context_id") or "",
+                _pct(chunk.get("score")),
+                chunk.get("content") or "",
+            ]
+        )
+    return Panel(
+        make_table("#", "From", "To", "Score", "Content", rows=rows),
+        title=f"[bold cyan]/// Forceful relations: {len(forceful)} chunk(s)[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 1),
+    )
+
+
+def _format_unified_query_result(r: dict, request_id: str | None = None):
+    """The unified structured response (PRO-1618) for a person: ``chunks[]`` as
+    panels, ``graph[]`` as path tables grouped by ``origin``,
+    ``forceful_relations[]`` as a table of what declared relations pulled in
+    (no section when there are none), and the feedback hint. ``llm_prompt`` is
+    not shown here: ``--llm`` prints it verbatim."""
+    chunks = _list_field(r, "chunks")
+    graph = _list_field(r, "graph")
+    forceful = [f for f in _list_field(r, "forceful_relations") if isinstance(f, dict)]
+    hint = _feedback_hint({"request_id": request_id}) if request_id else ""
+    if not chunks and not graph and not forceful:
+        return "[dim]No relevant results found.[/dim]" + hint
+
+    parts: list[Any] = [Text(f"  Found {len(chunks)} result(s)", style="bold")]
+    for i, chunk in enumerate(chunks, 1):
+        parts.append(_unified_chunk_panel(chunk, str(i)))
+
+    parts.extend(_graph_panels(graph, _chunk_labels(chunks, forceful)))
+
+    if forceful:
+        parts.append(_forceful_relations_panel(forceful))
+
+    if hint:
+        parts.append(Text.from_markup(hint.lstrip("\n")))
+    return Group(*parts)
+
+
+def _print_unified_query(body: dict, request_id: str | None, *, llm: bool) -> None:
+    """Print the actual response shape returned for a physical unified database.
+    ``--llm`` is the server-built prompt on plain
+    stdout (not Rich, which would re-wrap it at the terminal width and read
+    bracketed fragments as markup), with the feedback hint on stderr so the
+    prompt can be piped; otherwise the structured rendering."""
+    unified = _is_unified_query_body(body)
+    if get_output_format() == "json":
+        if request_id:
+            if "request_id" not in body:
+                body = {**body, "request_id": request_id}
+            elif body["request_id"] != request_id:
+                body = {"data": body, "request_id": request_id}
+        print_json(body)
+        return
+    request_id = request_id or body.get("request_id")
+    emit_scope_notice()
+    if llm:
+        prompt = body.get("llm_prompt")
+        if not isinstance(prompt, str):
+            print_error("Malformed query response: --llm requires a string llm_prompt.")
+        typer.echo(prompt)
+        if request_id:
+            err_console.print(_feedback_hint({"request_id": request_id}).lstrip("\n"))
+        return
+    console.print(_format_unified_query_result(body, request_id) if unified else _format_query_result(body, request_id))
+
+
+def _format_query_result(r: dict, request_id: str | None = None):
+    unified = _is_unified_query_body(r)
+    request_id = request_id if request_id is not None else r.get("request_id")
+    if unified:
+        # A unified body reached the split path (a server that does not list a
+        # database's layout still answers a type-less query on a unified one
+        # in the unified shape). Render it as what it is.
+        return _format_unified_query_result(r, request_id)
+    hint = _feedback_hint({"request_id": request_id})
+    chunks = list(r.get("chunks") or [])
+    linked_map = r.get("additional_graph_context")
+    if not isinstance(linked_map, dict):
+        linked_map = r.get("additional_context")
+    linked: list[dict] = []
+    if isinstance(linked_map, dict):
+        for value in linked_map.values():
+            if isinstance(value, list):
+                linked.extend(chunk for chunk in value if isinstance(chunk, dict))
+            elif isinstance(value, dict):
+                linked.append(value)
+    if not chunks and not linked:
+        return "[dim]No relevant results found.[/dim]" + hint
+
+    def chunk_panel(chunk: dict, label: str, border_style: str) -> Panel:
+        title_text = chunk.get("source_title", "")
+        title_str = f" — {title_text}" if title_text else ""
+        content = chunk.get("chunk_content", "") or ""
+        preview = content[:300] + "..." if len(content) > 300 else content
+        return Panel(
+            preview,
+            title=f"{label}{title_str}",
+            title_align="left",
+            border_style=border_style,
+            padding=(0, 1),
+        )
 
     panels: list[Any] = []
     for i, chunk in enumerate(chunks, 1):
         score = chunk.get("relevancy_score")
         score_str = f" • {score:.0%}" if score is not None else ""
-        title_text = chunk.get("source_title", "")
-        title_str = f" — {title_text}" if title_text else ""
-
-        content = chunk.get("chunk_content", "") or ""
-        preview = content[:300] + "..." if len(content) > 300 else content
-
-        panels.append(
-            Panel(
-                preview,
-                title=f"[bold]{i}[/bold]{score_str}{title_str}",
-                title_align="left",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        )
+        panels.append(chunk_panel(chunk, f"[bold]{i}[/bold]{score_str}", "cyan"))
+    # Linked chunks reached the response through graph links from the ranked
+    # results, not by ranking, so their scores are not comparable to the ranks.
+    panels.extend(chunk_panel(chunk, "[dim]linked[/dim]", "dim") for chunk in linked)
 
     graph = r.get("graph_context") or {}
     query_paths = graph.get("query_paths", []) if isinstance(graph, dict) else []
     if query_paths:
         panels.append(Text(f"  Graph: {len(query_paths)} entity path(s) found.", style="dim"))
 
-    hint = _feedback_hint(r)
     if hint:
         panels.append(Text.from_markup(hint.lstrip("\n")))
 
-    header = Text(f"  Found {len(chunks)} result(s)", style="bold")
+    linked_note = f", plus {len(linked)} linked chunk(s)" if linked else ""
+    header = Text(f"  Found {len(chunks)} result(s){linked_note}", style="bold")
     return Group(header, *panels)
 
 
@@ -136,16 +574,25 @@ def do_query(
     recency_bias: float | None = None,
     graph_context: bool | None = None,
     additional_context: str | None = None,
+    additional_graph_context: str | None = None,
+    query_explicit_relations: bool | None = None,
+    query_forceful_relations: bool | None = None,
     titles: list[str] | None = None,
     acl: list[str] | None = None,
+    follow_forceful_relations: bool | None = None,
+    llm: bool = False,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     spinner_msg: str = "Searching...",
+    kind_implied: bool = False,
 ) -> None:
+    """``kind_implied`` marks a kind the command picked (the deprecated
+    ``recall`` aliases), not one the user typed: a unified database has no
+    kinds, so it is dropped there instead of refused."""
     if not query.strip():
         print_error("Query cannot be empty.")
-    if kind and kind not in VALID_KINDS:
-        print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
+    if kind is not None and kind not in VALID_KINDS | {"all"}:
+        print_error(f"--type/--kind must be one of: all, knowledge, memory. Got '{kind}'.")
     if mode and mode not in VALID_MODES:
         print_error(f"--mode must be one of: {', '.join(sorted(VALID_MODES))}. Got '{mode}'.")
     if operator and operator not in VALID_OPERATORS:
@@ -169,11 +616,56 @@ def do_query(
             if key not in seen_titles:
                 seen_titles.add(key)
                 clean_titles.append(title)
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    controls = {
+        key: value
+        for key, value in {
+            "query_explicit_relations": query_explicit_relations,
+            "query_forceful_relations": query_forceful_relations,
+            "additional_graph_context": additional_graph_context,
+        }.items()
+        if value is not None
+    }
 
-    result = _execute(
+    def run_unified() -> None:
+        _refuse_kind_on_unified(None if kind_implied else kind, tid)
+        outcome = _execute(
+            spinner_msg,
+            lambda: wrapper.context.query_unified(
+                query=query,
+                operator=operator,
+                query_by="text" if operator else None,
+                max_results=max_results,
+                mode=mode,
+                alpha=alpha,
+                recency_bias=recency_bias,
+                graph_context=graph_context,
+                additional_context=additional_context,
+                titles=clean_titles,
+                acl=acl,
+                follow_forceful_relations=follow_forceful_relations,
+                **controls,
+                database=tid,
+                collection=stid,
+            ),
+        )
+        body, request_id = outcome if isinstance(outcome, tuple) else (outcome, None)
+        _print_unified_query(body, request_id, llm=llm)
+
+    layout = _layout(wrapper, tid)
+    if layout == LAYOUT_UNIFIED:
+        run_unified()
+        return
+
+    if llm and layout == LAYOUT_SPLIT:
+        print_error(f"--llm applies to unified databases only; '{tid}' is a split database and has no llm_prompt.")
+    if layout == LAYOUT_UNKNOWN and llm:
+        # Only a unified database takes these, so the request goes out unified.
+        run_unified()
+        return
+
+    result = _execute_or_unified(
         spinner_msg,
         lambda: wrapper.context.query(
             query=query,
@@ -186,12 +678,23 @@ def do_query(
             recency_bias=recency_bias,
             graph_context=graph_context,
             additional_context=additional_context,
+            **controls,
+            **(
+                {"follow_forceful_relations": follow_forceful_relations}
+                if follow_forceful_relations is not None
+                else {}
+            ),
             titles=clean_titles,
             acl=acl,
             database=tid,
             collection=stid,
         ),
+        layout,
+        tid,
+        run_unified,
     )
+    if result is UNIFIED_DONE:
+        return
     print_result(result, _format_query_result)
 
 
@@ -246,8 +749,7 @@ def do_feedback(
             "feedback needs something to record: pass --feedback, --ground-truth-answer, or --ground-truth-source-id."
         )
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
 
     result = _execute(
@@ -302,12 +804,18 @@ def do_ingest_memory(
     upsert: bool = True,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    layout: str | None = None,
+    on_unified: Callable[[], None] | None = None,
 ) -> None:
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    """``on_unified`` redoes the write in the unified shape when the layout
+    was unknown and the database turned out to be unified; without one, the
+    refusal is explained instead."""
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    what = "a memory (kind) cannot be written to it"
+    layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
 
-    result = _execute(
+    result = _execute_or_unified(
         "Adding memory...",
         lambda: wrapper.context.ingest(
             kind="memory",
@@ -321,7 +829,12 @@ def do_ingest_memory(
             database=tid,
             collection=stid,
         ),
+        layout,
+        tid,
+        on_unified or (lambda: _refuse_split_write(tid, what)),
     )
+    if result is UNIFIED_DONE:
+        return
     print_result(result, lambda r: _format_ingest_memory(r, text))
 
 
@@ -332,12 +845,16 @@ def do_ingest_knowledge_text(
     source_id: str | None = None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    layout: str | None = None,
+    on_unified: Callable[[], None] | None = None,
 ) -> None:
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    """``on_unified``: see :func:`do_ingest_memory`."""
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    what = "knowledge text (kind) cannot be written to it"
+    layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
 
-    result = _execute(
+    result = _execute_or_unified(
         "Uploading text...",
         lambda: wrapper.context.ingest(
             kind="knowledge",
@@ -347,7 +864,12 @@ def do_ingest_knowledge_text(
             database=tid,
             collection=stid,
         ),
+        layout,
+        tid,
+        on_unified or (lambda: _refuse_split_write(tid, what)),
     )
+    if result is UNIFIED_DONE:
+        return
 
     def fmt(r: dict):
         preview = text[:80] + "..." if len(text) > 80 else text
@@ -385,6 +907,7 @@ def do_ingest_knowledge_files(
     upsert: bool = False,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    layout: str | None = None,
 ) -> None:
     if not files:
         print_error("At least one file path is required.")
@@ -402,11 +925,12 @@ def do_ingest_knowledge_files(
             opened.append(fh)
             documents.append((p.name, fh, None))
 
-        tid = require_tenant_id(tenant_id)
-        stid = resolve_sub_tenant_id(sub_tenant_id)
+        tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
         wrapper = get_wrapper()
+        what = "files are not accepted (text or a conversation only). Extract the text first"
+        layout = _refuse_split_write_on_unified(wrapper, tid, layout, what)
 
-        result = _execute(
+        result = _execute_or_unified(
             f"Uploading {len(files)} file(s)...",
             lambda: wrapper.context.ingest_many(
                 kind="knowledge",
@@ -415,6 +939,9 @@ def do_ingest_knowledge_files(
                 database=tid,
                 collection=stid,
             ),
+            layout,
+            tid,
+            lambda: _refuse_split_write(tid, what),
         )
     finally:
         for fh in opened:
@@ -444,6 +971,228 @@ def do_ingest_knowledge_files(
     print_result(result, fmt)
 
 
+# ── ingest (unified databases, PRO-1618) ─────────────────────────────────────
+
+
+def _load_conversation(path: str) -> list[dict[str, Any]]:
+    """Read ``--conversation-file``: a JSON list of ``{role, content}``
+    turns (the speaker's name is the item's ``user_name``, from --user-name). Every turn is checked here so a bad one is named by index locally
+    rather than as ``context[0]`` after a round trip."""
+    p = Path(path)
+    if not p.is_file():
+        print_error(f"Conversation file not found: {path}")
+    try:
+        turns = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print_error(f"--conversation-file must be a JSON list of {{role, content}} turns: {exc}")
+    if not isinstance(turns, list) or not turns:
+        print_error("--conversation-file must be a non-empty JSON list of {role, content} turns.")
+    clean: list[dict[str, Any]] = []
+    for i, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            print_error(f"conversation[{i}] must be an object with role and content.")
+        role = turn.get("role")
+        if not isinstance(role, str) or role not in VALID_ROLES:
+            print_error(f"conversation[{i}].role must be one of: {', '.join(sorted(VALID_ROLES))}. Got {role!r}.")
+        content = turn.get("content")
+        if not isinstance(content, str) or not content.strip():
+            print_error(f"conversation[{i}].content must be a non-empty string.")
+        if "name" in turn:
+            print_error(
+                f"conversation[{i}] has a name: a turn is only {{role, content}}. "
+                "Pass the user's name once with --user-name instead."
+            )
+        unknown = sorted(set(turn) - {"role", "content"})
+        if unknown:
+            print_error(
+                f"conversation[{i}] has unknown field(s): {', '.join(unknown)}. Only role and content are accepted."
+            )
+        clean.append({"role": role, "content": content})
+    return clean
+
+
+def _parse_json_object(raw: str | None, flag: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        print_error(f"{flag} must be a JSON object: {exc}")
+    if not isinstance(parsed, dict):
+        print_error(f'{flag} must be a JSON object, for example \'{{"team": "support"}}\'.')
+    return parsed
+
+
+def build_context_item(
+    *,
+    text: str | None = None,
+    conversation: list[dict[str, Any]] | None = None,
+    context_id: str | None = None,
+    title: str | None = None,
+    user_name: str | None = None,
+    enrich: bool = True,
+    instructions: str | None = None,
+    happened_at: str | None = None,
+    attributes: dict[str, Any] | None = None,
+    custom_attributes: dict[str, Any] | None = None,
+    category: str | None = None,
+    forceful_relations: list[str] | None = None,
+    acl: list[str] | None = None,
+    upsert: bool = True,
+) -> dict[str, Any]:
+    """One ``context[]`` item in the contract's exact field names (PRO-1618).
+
+    Exactly one of ``text`` or ``conversation``. Optional fields are omitted
+    when unset, never sent as null; ``enrich`` and ``upsert`` are always sent
+    because the CLI always has a value for them.
+    """
+    if (text is None) == (conversation is None):
+        print_error("Pass exactly one of --text or --conversation-file.")
+    item: dict[str, Any] = {}
+    if context_id:
+        if len(context_id) > UNIFIED_MAX_CONTEXT_ID_CHARS or "," in context_id:
+            print_error(f"--context-id must be at most {UNIFIED_MAX_CONTEXT_ID_CHARS} characters with no commas.")
+        item["context_id"] = context_id
+    if title:
+        if len(title.encode("utf-8")) > UNIFIED_MAX_TITLE_BYTES:
+            print_error(f"--title must be at most {UNIFIED_MAX_TITLE_BYTES} bytes.")
+        item["title"] = title
+    if text is not None:
+        item["text"] = text
+    else:
+        item["conversation"] = conversation
+    body = text if text is not None else "".join(turn["content"] for turn in conversation or [])
+    if len(body.encode("utf-8")) > UNIFIED_MAX_TEXT_BYTES:
+        print_error(
+            f"The item is {len(body.encode('utf-8')):,} bytes of text; a unified database takes at most "
+            f"{UNIFIED_MAX_TEXT_BYTES:,} per item. Split it into several items."
+        )
+    if user_name is not None:
+        if not user_name.strip():
+            print_error("--user-name cannot be empty or whitespace-only.")
+        item["user_name"] = user_name
+    item["enrich"] = bool(enrich)
+    item["upsert"] = bool(upsert)
+    if instructions:
+        if len(instructions) > UNIFIED_MAX_INSTRUCTIONS_CHARS:
+            print_error(f"--instructions must be at most {UNIFIED_MAX_INSTRUCTIONS_CHARS} characters.")
+        item["instructions"] = instructions
+    if happened_at:
+        try:
+            valid = bool(_DATE_RE.match(happened_at)) and date.fromisoformat(happened_at) is not None
+        except ValueError:
+            valid = False
+        if not valid:
+            print_error(f"--happened-at must be a calendar date in YYYY-MM-DD form, got '{happened_at}'.")
+        item["happened_at"] = happened_at
+    if attributes is not None:
+        item["attributes"] = attributes
+    if custom_attributes is not None:
+        item["custom_attributes"] = custom_attributes
+    if category:
+        if category not in VALID_CATEGORIES:
+            print_error(f"--category must be one of: {', '.join(sorted(VALID_CATEGORIES))}. Got '{category}'.")
+        item["context_category"] = category
+    if forceful_relations:
+        ids: list[str] = []
+        for value in forceful_relations:
+            candidate = (value or "").strip()
+            if not candidate:
+                print_error("--forceful-relation cannot be empty or whitespace-only.")
+            if candidate not in ids:
+                ids.append(candidate)
+        item["forceful_relations"] = {"context_ids": ids}
+    if acl is not None:
+        item["acl"] = list(acl)
+    return item
+
+
+def _format_ingest_unified(r: dict, item: dict[str, Any]):
+    success_count = r.get("success_count", 0)
+    failed_count = r.get("failed_count", 0)
+    ok = failed_count == 0
+    status = "green" if ok else "yellow"
+    mark = "✓" if ok else "!"
+    if "conversation" in item:
+        preview = f"conversation, {len(item['conversation'])} turn(s)"
+    else:
+        preview = f'"{_preview(item.get("text") or "", 80)}"'
+    lines = [
+        f"[{status}]{mark}[/{status}] Context queued ({success_count} success, {failed_count} failed)",
+        f"[dim]{escape(preview)}[/dim]",
+    ]
+    for res in r.get("results", []) or []:
+        # The 202 names the item's context_id `id`; older servers said `source_id`.
+        cid = res.get("id") or res.get("context_id") or res.get("source_id") or "unknown"
+        lines.append(f"[cyan]Context ID:[/cyan] {escape(str(cid))} [dim]({res.get('status', 'unknown')})[/dim]")
+        if res.get("error"):
+            code = f" ({res['error_code']})" if res.get("error_code") else ""
+            lines.append(f"[red]Error:[/red] {escape(str(res['error']))}{escape(code)}")
+    lines.append("[dim]Poll with 'hydradb verify <context id>'.[/dim]")
+    return Panel("\n".join(lines), border_style=status, padding=(0, 1))
+
+
+def do_ingest_unified(
+    *,
+    text: str | None = None,
+    conversation_file: str | None = None,
+    context_id: str | None = None,
+    title: str | None = None,
+    user_name: str | None = None,
+    enrich: bool = True,
+    instructions: str | None = None,
+    happened_at: str | None = None,
+    attributes: str | None = None,
+    custom_attributes: str | None = None,
+    category: str | None = None,
+    forceful_relations: list[str] | None = None,
+    acl: list[str] | None = None,
+    upsert: bool = True,
+    tenant_id: str | None = None,
+    sub_tenant_id: str | None = None,
+) -> None:
+    """Ingest one context item into a UNIFIED database: a JSON ``POST
+    /context/ingest`` with the ``context`` list, no ``type``, no multipart."""
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
+    if conversation_file and text is not None:
+        print_error("Pass exactly one of --text or --conversation-file.")
+    conversation = _load_conversation(conversation_file) if conversation_file else None
+    item = build_context_item(
+        text=text,
+        conversation=conversation,
+        context_id=context_id,
+        title=title,
+        user_name=user_name,
+        enrich=enrich,
+        instructions=instructions,
+        happened_at=happened_at,
+        attributes=_parse_json_object(attributes, "--attributes"),
+        custom_attributes=_parse_json_object(custom_attributes, "--custom-attributes"),
+        category=category,
+        forceful_relations=forceful_relations,
+        acl=acl,
+        upsert=upsert,
+    )
+    wrapper = get_wrapper()
+
+    result = _execute(
+        "Ingesting context...",
+        lambda: wrapper.context.ingest_context([item], database=tid, collection=stid),
+    )
+    print_result(result, lambda r: _format_ingest_unified(r, item))
+    # A 202 only means accepted: the per-item verdicts are in the body, and a
+    # failure among them is a failed ingest. The panel above already printed
+    # the server's own error for the row; the exit code is what says the
+    # command did not succeed.
+    failed_rows = [
+        r
+        for r in (result.get("results") or [])
+        if isinstance(r, dict) and (r.get("error") or r.get("status") in ("failed", "errored"))
+    ]
+    if (result.get("failed_count") or 0) > 0 or failed_rows:
+        raise typer.Exit(code=1)
+
+
 # ── list ─────────────────────────────────────────────────────────────────────
 
 
@@ -456,7 +1205,9 @@ def do_list(
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
     spinner_msg: str = "Fetching sources...",
+    kind_implied: bool = False,
 ) -> None:
+    """``kind_implied``: see :func:`do_query`."""
     if kind and kind not in VALID_KINDS:
         print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
     if page is not None and page < 1:
@@ -464,21 +1215,31 @@ def do_list(
     if page_size is not None and (page_size < 1 or page_size > 100):
         print_error(f"--page-size must be between 1 and 100, got {page_size}.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    layout = _layout(wrapper, tid)
 
-    result = _execute(
-        spinner_msg,
-        lambda: wrapper.context.list(
-            kind=kind,
-            page=page,
-            page_size=page_size,
-            acl=acl,
-            database=tid,
-            collection=stid,
-        ),
-    )
+    def listing(list_kind: str | None) -> Callable[[], Any]:
+        return lambda: wrapper.context.list(
+            kind=list_kind, page=page, page_size=page_size, acl=acl, database=tid, collection=stid
+        )
+
+    unified_result: list[Any] = []
+
+    def run_unified() -> None:
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(None if kind_implied else kind, tid)
+        unified_result.append(_execute(spinner_msg, listing(None)))
+
+    if layout == LAYOUT_UNIFIED:
+        run_unified()
+        result = unified_result[0]
+    else:
+        result = _execute_or_unified(spinner_msg, listing(kind), layout, tid, run_unified)
+        if result is UNIFIED_DONE:
+            result = unified_result[0]
+    # A unified database has one corpus, so a per-item kind would only mislead.
+    show_type = not unified_result
 
     def fmt(r: dict):
         items = r.get("sources") or r.get("user_memories") or []
@@ -489,8 +1250,9 @@ def do_list(
             sid = item.get("id") or item.get("memory_id") or item.get("source_id") or "unknown"
             title = item.get("title") or item.get("memory_content") or item.get("content") or item.get("text") or ""
             title = title[:100] + "..." if len(title) > 100 else title
-            rows.append([str(i), sid, title, item.get("type", "")])
-        table = make_table("#", "ID", "Title", "Type", rows=rows, title=f"Found {len(items)} item(s)")
+            rows.append([str(i), sid, title, item.get("type", "")] if show_type else [str(i), sid, title])
+        columns = ("#", "ID", "Title", "Type") if show_type else ("#", "ID", "Title")
+        table = make_table(*columns, rows=rows, title=f"Found {len(items)} item(s)")
 
         parts: list[Any] = [table]
         footer_parts = []
@@ -524,8 +1286,7 @@ def do_inspect(
     if mode not in VALID_FETCH_MODES:
         print_error(f"--mode must be one of: {', '.join(sorted(VALID_FETCH_MODES))}. Got '{mode}'.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
 
     try:
@@ -577,26 +1338,49 @@ def do_inspect(
 def do_delete(
     ids: list[str],
     *,
-    kind: str,
+    kind: str | None,
     tenant_id: str | None = None,
     sub_tenant_id: str | None = None,
+    kind_implied: bool = False,
 ) -> None:
+    """``kind_implied``: see :func:`do_query`."""
     clean_ids = [i.strip() for i in ids if i.strip()]
     if not clean_ids:
         print_error("IDs cannot be empty.")
-    if kind not in VALID_KINDS:
+    if kind is not None and kind not in VALID_KINDS:
         print_error(f"--kind must be one of: {', '.join(sorted(VALID_KINDS))}. Got '{kind}'.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    layout = _layout(wrapper, tid)
+    unified_result: list[Any] = []
 
-    result = _execute(
-        "Deleting...",
-        lambda: wrapper.context.delete(ids=clean_ids, kind=kind, database=tid, collection=stid),
-    )
+    def run_unified() -> None:
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(None if kind_implied else kind, tid)
+        unified_result.append(
+            _execute(
+                "Deleting...", lambda: wrapper.context.delete(ids=clean_ids, kind=None, database=tid, collection=stid)
+            )
+        )
 
-    noun = "memory" if kind == "memory" else "knowledge source(s)"
+    if layout == LAYOUT_UNIFIED:
+        run_unified()
+        result, noun = unified_result[0], "item(s)"
+    else:
+        # The split default, unchanged: a delete without --kind is a knowledge delete.
+        split_kind = kind or "knowledge"
+        noun = "memory" if split_kind == "memory" else "knowledge source(s)"
+        result = _execute_or_unified(
+            "Deleting...",
+            lambda: wrapper.context.delete(ids=clean_ids, kind=split_kind, database=tid, collection=stid),
+            layout,
+            tid,
+            run_unified,
+        )
+        if result is UNIFIED_DONE:
+            result, noun = unified_result[0], "item(s)"
+
     # v2 returns HTTP 200 with {success:false, deleted_count:0} when nothing
     # matched — that is a no-op, not a success. Surface it as an error (non-zero
     # exit, and `{"success":false,"error":…}` in json mode) rather than claiming
@@ -628,9 +1412,11 @@ def do_relations(
     if limit is not None and limit < 1:
         print_error(f"--limit must be at least 1, got {limit}.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    if _is_unified(wrapper, tid):
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(kind, tid)
 
     result = _execute(
         "Fetching graph relations...",
@@ -686,9 +1472,11 @@ def do_subgraph(
     if max_sources is not None and max_sources < 1:
         print_error(f"--max-sources must be at least 1, got {max_sources}.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
+    if _is_unified(wrapper, tid):
+        # One corpus: no kind is selected and none is sent.
+        _refuse_kind_on_unified(kind, tid)
 
     result = _execute(
         "Traversing the connected subgraph...",
@@ -768,8 +1556,7 @@ def do_ingestion_status(
     if not clean_ids:
         print_error("At least one source ID is required.")
 
-    tid = require_tenant_id(tenant_id)
-    stid = resolve_sub_tenant_id(sub_tenant_id)
+    tid, stid = resolve_context_scope(tenant_id, sub_tenant_id)
     wrapper = get_wrapper()
 
     result = _execute(
@@ -804,9 +1591,11 @@ def do_ingestion_status(
 # ── database group ───────────────────────────────────────────────────────────
 
 
-def do_database_create(database: str) -> None:
+def do_database_create(database: str, layout: str | None = None) -> None:
     if not database.strip():
         print_error("Database ID cannot be empty.")
+    if layout and layout not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
+        print_error(f"--type must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}'. Got '{layout}'.")
 
     # is_embeddings_tenant is deliberately not passed. The API treats it as an
     # internal flag: it provisions a raw-embeddings collection *instead of* the
@@ -815,9 +1604,16 @@ def do_database_create(database: str) -> None:
     wrapper = get_wrapper()
     result = _execute(
         "Creating database...",
-        lambda: wrapper.databases.create(database=database),
+        lambda: wrapper.databases.create(database=database, layout=layout),
     )
-    print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.")
+    if layout == LAYOUT_UNIFIED:
+        suffix = " (unified: one corpus, no --kind on later commands)"
+    elif layout == LAYOUT_SPLIT:
+        suffix = " (split: knowledge and memory, selected by --kind)"
+    else:
+        # No --type: the server picks, and current servers pick unified.
+        suffix = " (the server's default layout; 'hydradb database list' shows which)"
+    print_result(result, lambda r: f"[green]✓[/green] Database [bold]{database}[/bold] created successfully.{suffix}")
 
 
 def do_database_delete(database: str) -> None:
@@ -836,7 +1632,11 @@ def do_database_list() -> None:
         ids = r.get("databases") or r.get("tenant_ids") or []
         if not ids:
             return "[dim]No databases found.[/dim]"
-        return make_table("Database ID", rows=[[i] for i in ids], title=f"Found {len(ids)} database(s)")
+        # `details[]` (PRO-1618) carries each database's storage layout; a
+        # server that omits it has only split databases.
+        layouts = {row.get("database"): row.get("type") for row in (r.get("details") or []) if isinstance(row, dict)}
+        rows = [[i, LAYOUT_UNIFIED if layouts.get(i) == LAYOUT_UNIFIED else LAYOUT_SPLIT] for i in ids]
+        return make_table("Database ID", "Type", rows=rows, title=f"Found {len(ids)} database(s)")
 
     print_result(result, fmt)
 

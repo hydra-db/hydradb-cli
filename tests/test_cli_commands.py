@@ -268,13 +268,15 @@ class TestIngest:
             result = runner.invoke(app, ["ingest", str(f), "--text", "x"])
         assert result.exit_code != 0
 
-    def test_ingest_files_with_markdown_fails(self, tmp_path):
+    def test_ingest_files_with_markdown_uploads_the_files_unchanged(self, tmp_path):
         _auth()
         f = tmp_path / "a.txt"
         f.write_text("aaa")
-        with _patch_wrapper(_wrapper()):
+        w = _wrapper(**{"context.ingest_many": {"success_count": 1, "failed_count": 0, "results": []}})
+        with _patch_wrapper(w):
             result = runner.invoke(app, ["ingest", str(f), "--markdown"])
-        assert result.exit_code != 0
+        assert result.exit_code == 0, result.output
+        assert "markdown" not in w.context.ingest_many.call_args.kwargs
 
     def test_ingest_files_with_no_infer_fails(self, tmp_path):
         _auth()
@@ -337,7 +339,7 @@ class TestListInspectDeleteRelationsVerify:
         with _patch_wrapper(w):
             result = runner.invoke(app, ["--output", "json", "delete", "ghost", "--kind", "knowledge", "--yes"])
         assert result.exit_code != 0
-        assert json.loads(result.output)["success"] is False
+        assert json.loads(result.stdout)["success"] is False
 
     def test_relations(self):
         _auth()
@@ -449,7 +451,15 @@ class TestListInspectDeleteRelationsVerify:
         with _patch_wrapper(w):
             result = runner.invoke(app, ["--output", "json", "subgraph", "src_1"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output) == payload
+        assert json.loads(result.stdout) == {
+            **payload,
+            "scope": {
+                "database": "t1",
+                "collection": None,
+                "database_source": "default",
+                "collection_source": "server_default",
+            },
+        }
 
     def test_subgraph_unknown_id_is_an_answer(self):
         _auth()

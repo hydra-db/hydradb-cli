@@ -18,6 +18,7 @@ import pytest
 from hydra_db import HydraDB as _SdkHydraDB
 
 from hydradb_cli.hydra import HydraDB
+from hydradb_cli.hydra import client as _client_module
 
 VECTORS_PATH = Path(__file__).parent / "vectors.json"
 
@@ -42,8 +43,12 @@ class Recorder:
         self.content_type = request.headers.get("content-type", "")
         self.params = dict(request.url.params)
         self.body = request.content
-        # A minimal, universally-parseable envelope so SDK response parsing succeeds.
-        return httpx.Response(200, json={"success": True, "data": {}, "meta": {}})
+        payload = {}
+        if request.url.path in ("/databases", "/databases/status", "/databases/stats"):
+            payload = {"database": "db_test", "status": "accepted"}
+        elif request.url.path == "/query":
+            payload = {"chunks": []}
+        return httpx.Response(200, json={"success": True, "data": payload, "meta": {}})
 
     # -- extraction helpers ---------------------------------------------------
 
@@ -92,9 +97,15 @@ def scope_defaults() -> dict:
 
 
 @pytest.fixture
-def wrapper(recorder: Recorder, scope_defaults: dict) -> HydraDB:
+def wrapper(recorder: Recorder, scope_defaults: dict, monkeypatch) -> HydraDB:
     """A wrapper whose SDK talks to the recording mock transport, scoped to the
-    vectors' default database/collection."""
+    vectors' default database/collection.
+
+    The unified calls (PRO-1618) do not go through the SDK: the wrapper sends
+    them over its raw v2 path with the module-level ``httpx`` functions. Those
+    are routed to the same recorder, so a unified vector is asserted exactly
+    the way a split one is.
+    """
     w = HydraDB(
         token="test-token",
         base_url="http://conformance.test",
@@ -106,4 +117,19 @@ def wrapper(recorder: Recorder, scope_defaults: dict) -> HydraDB:
         base_url="http://conformance.test",
         httpx_client=httpx.Client(transport=httpx.MockTransport(recorder.handler)),
     )
+
+    def _via_recorder(method: str):
+        def call(url, *, headers=None, json=None, params=None, files=None, timeout=None, **_ignored):
+            request = httpx.Request(method, url, headers=headers, json=json, params=params, files=files)
+            request.read()
+            return recorder.handler(request)
+
+        return call
+
+    def _request(method: str, url, **kwargs):
+        return _via_recorder(method)(url, **kwargs)
+
+    monkeypatch.setattr(_client_module.httpx, "post", _via_recorder("POST"))
+    monkeypatch.setattr(_client_module.httpx, "get", _via_recorder("GET"))
+    monkeypatch.setattr(_client_module.httpx, "request", _request)
     return w

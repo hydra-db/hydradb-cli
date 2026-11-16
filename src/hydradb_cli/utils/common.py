@@ -6,7 +6,8 @@ import httpx
 
 from hydradb_cli.config import get_api_key, get_base_url, get_collection, get_database, get_graph_collection
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
-from hydradb_cli.output import print_error, warn_deprecated
+from hydradb_cli.hydra.client import NO_DATABASE_MESSAGE
+from hydradb_cli.output import print_error, set_scope_notice, warn_deprecated
 
 
 def mask_api_key(key: str) -> str:
@@ -28,13 +29,26 @@ def require_tenant_id(tenant_id: str | None = None) -> str:
     """Get the database (tenant) scope from argument, config, or exit with error."""
     tid = tenant_id or get_database()
     if not tid or not tid.strip():
-        print_error("No database specified. Use --database or run 'hydradb config set database <id>'.")
+        print_error(NO_DATABASE_MESSAGE)
     return tid  # type: ignore[return-value]
 
 
 def resolve_sub_tenant_id(sub_tenant_id: str | None = None) -> str | None:
     """Get the collection (sub-tenant) scope from argument or config (may be None)."""
     return sub_tenant_id or get_collection()
+
+
+def resolve_context_scope(database: str | None, collection: str | None) -> tuple[str, str | None]:
+    """Resolve context scope and surface whether each value was overridden."""
+    db = require_tenant_id(database)
+    col = resolve_sub_tenant_id(collection)
+    set_scope_notice(
+        db,
+        col,
+        database_source="explicit" if database else "default",
+        collection_source="explicit" if collection else "default" if col else "server_default",
+    )
+    return db, col
 
 
 def resolve_scope_flags(

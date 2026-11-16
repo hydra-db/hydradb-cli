@@ -1,6 +1,7 @@
 """Tests for hydradb_cli.output module."""
 
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -12,6 +13,7 @@ from hydradb_cli.output import (
     print_success,
     print_table,
     set_output_format,
+    set_scope_notice,
 )
 
 
@@ -45,6 +47,59 @@ class TestPrintJson:
         output = capsys.readouterr().out
         parsed = json.loads(output)
         assert parsed["a"]["b"] == [1, 2, 3]
+
+    @pytest.mark.parametrize(
+        "payload, placement",
+        [
+            ({"chunks": []}, "scope"),
+            ({"cli_scope": {"server_fallback": True}, "data": {"original": True}}, "scope"),
+            ({"scope": {"server_owned": True}}, "cli_scope"),
+            ({"scope": None}, "cli_scope"),
+            (
+                {
+                    "scope": {"server_owned": True},
+                    "cli_scope": {"server_fallback": True},
+                    "cli_scope_1": {"another_fallback": True},
+                    "data": {"original": True},
+                    "warnings": [{"code": "server_warning"}],
+                },
+                "envelope",
+            ),
+            ({"scope": None, "cli_scope": None, "data": "server data"}, "envelope"),
+        ],
+        ids=["normal", "backend-fallback-only", "backend-scope", "null-scope", "both-owned", "both-null"],
+    )
+    def test_scope_notice_preserves_backend_fields_and_input(self, payload, placement, capsys):
+        original = deepcopy(payload)
+        notice = {
+            "database": "db_test",
+            "collection": "col_test",
+            "database_source": "explicit",
+            "collection_source": "default",
+        }
+        set_output_format("json")
+        set_scope_notice("db_test", "col_test", database_source="explicit", collection_source="default")
+
+        print_json(payload)
+
+        captured = capsys.readouterr()
+        expected = (
+            {"data": original, "cli_scope": notice} if placement == "envelope" else {**original, placement: notice}
+        )
+        assert json.loads(captured.out) == expected
+        assert captured.err == ""
+        assert payload == original
+
+    def test_backend_scope_fields_are_unchanged_without_a_client_notice(self, capsys):
+        payload = {"scope": {"server_owned": True}, "cli_scope": {"server_fallback": True}, "data": [1]}
+        original = deepcopy(payload)
+
+        print_json(payload)
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == original
+        assert captured.err == ""
+        assert payload == original
 
 
 class TestPrintSuccess:

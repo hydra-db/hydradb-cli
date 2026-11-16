@@ -16,7 +16,11 @@ Responsibilities (CONTRACT §2):
 
 from __future__ import annotations
 
+import email.utils
+import inspect
 import json
+import random
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -33,6 +37,10 @@ from hydradb_cli.hydra.errors import HydraDBClientError, _stringify_body, transl
 # dependency on CLI configuration — the wrapper is meant to be portable.
 DEFAULT_BASE_URL = "https://api.hydradb.com"
 DEFAULT_GRAPH_COLLECTION = "default"
+NO_DATABASE_MESSAGE = (
+    "No database specified. Use --database or run 'hydradb config set database <id>'. "
+    "List your databases with 'hydradb database list', or create one with 'hydradb database create <name>'."
+)
 
 
 def _is_envelope(obj: Any) -> bool:
@@ -53,15 +61,78 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
+def _merge_warning_field(target: dict[str, Any], key: str, value: Any) -> None:
+    """Copy a payload warning field without replacing an existing value."""
+    if key not in target:
+        target[key] = value
+        return
+    existing = target.get("response_warnings", [])
+    existing_items = existing if isinstance(existing, list) else [existing]
+    value_items = value if isinstance(value, list) else [value]
+    target["response_warnings"] = [*existing_items, *value_items]
+
+
+def _with_warnings(data: Any, meta: Any) -> Any:
+    """Preserve envelope warnings using the compatibility bridge from PR #41."""
+    from hydradb_cli.output import err_console
+
+    meta = _dump(meta)
+    raw_warnings = meta.get("warnings") if isinstance(meta, dict) else None
+    if not isinstance(raw_warnings, list):
+        return data
+    warnings = []
+    for warning in raw_warnings:
+        warning = _dump(warning)
+        if (
+            isinstance(warning, dict)
+            and isinstance(warning.get("code"), str)
+            and warning["code"]
+            and (warning.get("message") is None or isinstance(warning["message"], str))
+        ):
+            warnings.append(warning)
+    if not warnings:
+        return data
+    for warning in warnings:
+        err_console.print("warning: " + json.dumps(warning, ensure_ascii=False), markup=False)
+    if isinstance(data, dict):
+        result = dict(data)
+        _merge_warning_field(result, "warnings", warnings)
+        return result
+    return data
+
+
+def _query_controls(
+    *,
+    query_explicit_relations: bool | None = None,
+    follow_forceful_relations: bool | None = None,
+    query_forceful_relations: bool | None = None,
+    additional_graph_context: str | None = None,
+    additional_context: str | None = None,
+    context: str | None = None,
+) -> dict[str, Any]:
+    """Send each setting once under its new name, picking the first alias
+    present and keeping false and empty-string overrides."""
+    controls: dict[str, Any] = {}
+    relations = next(
+        (v for v in (query_explicit_relations, follow_forceful_relations, query_forceful_relations) if v is not None),
+        None,
+    )
+    if relations is not None:
+        controls["query_explicit_relations"] = relations
+    hint = next((v for v in (additional_graph_context, additional_context, context) if v is not None), None)
+    if hint is not None:
+        controls["additional_graph_context"] = hint
+    return controls
+
+
 def _unwrap(obj: Any) -> Any:
     """Return the plain-dict payload for an SDK response.
 
-    Enveloped responses collapse to their ``.data`` (an empty dict when data is
-    null); non-enveloped responses are dumped as-is.
+    Enveloped responses collapse to their ``.data`` with additive warning and
+    request-ID metadata; non-enveloped responses are dumped as-is.
     """
     if _is_envelope(obj):
-        data = _dump(obj.data)
-        return data if data is not None else {}
+        return _unwrap_payload({"data": _dump(obj.data), "meta": _dump(obj.meta), "success": obj.success})
     dumped = _dump(obj)
     return dumped if dumped is not None else {}
 
@@ -80,7 +151,11 @@ def _unwrap_payload(body: Any) -> Any:
     """
     if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
         data = body["data"]
-        return data if data is not None else {}
+        result = _with_warnings(data if data is not None else {}, body.get("meta"))
+        rid = _request_id_of(body)
+        if rid and isinstance(result, dict) and "request_id" not in result:
+            result = {**result, "request_id": rid}
+        return result
     return body if body is not None else {}
 
 
@@ -109,6 +184,54 @@ def _bool_str(value: bool | None) -> str | None:
     if value is None:
         return None
     return "true" if value else "false"
+
+
+def _query_retry_delay(response: httpx.Response | None, retries: int) -> float:
+    """Mirror the SDK read retry policy, as in PR #41's wire bridge."""
+    if response is not None:
+        headers = response.headers
+        value = headers.get("retry-after-ms")
+        try:
+            delay = int(value) / 1000 if value is not None else 0
+        except ValueError:
+            delay = 0
+        if delay > 0:
+            return min(delay, 60.0)
+        value = headers.get("retry-after")
+        if value:
+            try:
+                delay = (
+                    float(int(value))
+                    if value.strip().isdigit()
+                    else email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+                )
+            except (ValueError, TypeError, OverflowError):
+                delay = 0
+            if delay > 0:
+                return min(delay, 60.0)
+        try:
+            reset_delay = int(headers.get("x-ratelimit-reset", "0")) - time.time()
+        except ValueError:
+            reset_delay = 0
+        if reset_delay > 0:
+            return min(reset_delay, 60.0) * (1 + random.SystemRandom().random() * 0.2)
+    return min(2.0**retries, 60.0) * (0.9 + random.SystemRandom().random() * 0.2)
+
+
+#: Storage layouts (PRO-1618). ``split`` is every database that predates the
+#: change: a knowledge and a memory corpus, selected by ``type`` on every call.
+#: ``unified`` is one corpus; ``type`` is never sent to it.
+LAYOUT_SPLIT = "split"
+LAYOUT_UNIFIED = "unified"
+
+#: Item cap on a unified ``POST /context/ingest``, checked locally so an
+#: oversized batch is refused before it costs a round trip.
+UNIFIED_INGEST_MAX_ITEMS = 100
+
+#: The layout probe runs before every command, so it gets a short budget and
+#: no SDK retries: a slow or failing ``GET /databases`` must not hold up (or
+#: fail) a command that would otherwise succeed.
+LAYOUT_PROBE_TIMEOUT_S = 5
 
 
 class _Resource:
@@ -145,13 +268,39 @@ class _Databases(_Resource):
         embeddings_dimension: int | None = None,
         is_embeddings_tenant: bool | None = None,
         database_metadata_schema: Any | None = None,
+        layout: str | None = None,
     ) -> dict:
+        """Create a database.
+
+        ``layout`` is the storage layout (PRO-1618), sent as the wire field
+        ``type``: ``split`` or ``unified`` (one corpus; ``type`` is never sent
+        on later calls). Without one the server picks, and current servers
+        pick unified.
+        """
+        if layout is not None and layout not in (LAYOUT_SPLIT, LAYOUT_UNIFIED):
+            raise ValueError(f"layout must be '{LAYOUT_SPLIT}' or '{LAYOUT_UNIFIED}', got {layout!r}")
+        if layout is not None and "type" not in inspect.signature(self._w._sdk.databases.create).parameters:
+            return self._w._raw_post(
+                "/databases",
+                json_body={
+                    key: value
+                    for key, value in {
+                        "database": database,
+                        "embeddings_dimension": embeddings_dimension,
+                        "is_embeddings_tenant": is_embeddings_tenant,
+                        "database_metadata_schema": database_metadata_schema,
+                        "type": layout,
+                    }.items()
+                    if value is not None
+                },
+            )
         resp = self._invoke(
             self._w._sdk.databases.create,
             database=database,
             embeddings_dimension=embeddings_dimension,
             is_embeddings_tenant=is_embeddings_tenant,
             database_metadata_schema=database_metadata_schema,
+            type=layout,
         )
         return _unwrap(resp)
 
@@ -162,6 +311,44 @@ class _Databases(_Resource):
     def list(self) -> dict:
         resp = self._invoke(self._w._sdk.databases.list)
         return _unwrap(resp)
+
+    def layouts(self) -> dict[str, str]:
+        """Every database this key can see, mapped to its storage layout.
+
+        Read from ``GET /databases`` ``details[].type`` (PRO-1618) and memoised
+        on the wrapper: a layout is fixed at creation, so it cannot go stale
+        within one process. A database missing from ``details[]`` (an older
+        server, or one that does not expose the field) is split, which is what
+        every pre-PRO-1618 database is.
+        """
+        if self._w._layouts is not None:
+            return self._w._layouts
+        listed = _unwrap(
+            self._invoke(
+                self._w._sdk.databases.list,
+                request_options={"timeout_in_seconds": LAYOUT_PROBE_TIMEOUT_S, "max_retries": 0},
+            )
+        )
+        layouts: dict[str, str] = {}
+        rows = listed.get("details") if isinstance(listed, dict) else None
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("database"):
+                layouts[str(row["database"])] = LAYOUT_UNIFIED if row.get("type") == LAYOUT_UNIFIED else LAYOUT_SPLIT
+        self._w._layouts = layouts
+        return layouts
+
+    def layout(self, database: str) -> str:
+        """The storage layout of one database: ``unified`` or ``split``.
+
+        Split is what a SUCCESSFUL probe reports: a database missing from
+        ``details[]`` (an older server, or one that does not expose the
+        field) is what every pre-PRO-1618 database is. A failed probe
+        propagates instead: answering split on a network, auth or parse
+        failure would send the split request shape to a database that may
+        be unified. Failures are not memoised either: ``layouts()`` only
+        caches a response it actually got, so the next call asks again.
+        """
+        return self.layouts().get(database, LAYOUT_SPLIT)
 
     def collections(self, *, database: str | None = None) -> dict:
         resp = self._invoke(self._w._sdk.databases.collections, database=self._w._require_database(database))
@@ -235,6 +422,11 @@ class _Context(_Resource):
         recency_bias: float | None = None,
         graph_context: bool | None = None,
         additional_context: str | None = None,
+        additional_graph_context: str | None = None,
+        context: str | None = None,
+        query_explicit_relations: bool | None = None,
+        follow_forceful_relations: bool | None = None,
+        query_forceful_relations: bool | None = None,
         query_by: str | None = None,
         titles: list[str] | None = None,
         acl: list[str] | None = None,
@@ -247,12 +439,16 @@ class _Context(_Resource):
         """
         database_name = self._w._require_database(database)
         collection_name = self._w._resolve_collection(collection)
+        controls = _query_controls(
+            query_explicit_relations=query_explicit_relations,
+            follow_forceful_relations=follow_forceful_relations,
+            query_forceful_relations=query_forceful_relations,
+            additional_graph_context=additional_graph_context,
+            additional_context=additional_context,
+            context=context,
+        )
 
-        # hydradb-sdk 2.1.4 predates the titles field and would reject the
-        # unknown keyword before sending a request. Use the wrapper's equivalent
-        # v2 JSON transport only for title-filtered queries until the generated
-        # SDK exposes it; ordinary queries remain on the SDK path.
-        if titles:
+        if titles or any(key not in inspect.signature(self._w._sdk.query).parameters for key in controls):
             body = {
                 key: value
                 for key, value in {
@@ -264,7 +460,7 @@ class _Context(_Resource):
                     "alpha": alpha,
                     "recency_bias": recency_bias,
                     "graph_context": graph_context,
-                    "additional_context": additional_context,
+                    **controls,
                     "query_by": query_by,
                     "titles": titles,
                     "acl": acl,
@@ -273,7 +469,7 @@ class _Context(_Resource):
                 }.items()
                 if value is not None
             }
-            result = self._w._raw_post("/query", json_body=body)
+            result = self._w._raw_post("/query", json_body=body, read_only=True)
             return result if isinstance(result, dict) else {}
 
         resp = self._invoke(
@@ -286,7 +482,7 @@ class _Context(_Resource):
             alpha=alpha,
             recency_bias=recency_bias,
             graph_context=graph_context,
-            additional_context=additional_context,
+            **controls,
             query_by=query_by,
             acl=acl,
             database=database_name,
@@ -303,6 +499,98 @@ class _Context(_Resource):
         if request_id and isinstance(data, dict) and "request_id" not in data:
             data["request_id"] = request_id
         return data
+
+    def query_unified(
+        self,
+        *,
+        query: str,
+        operator: str | None = None,
+        max_results: int | None = None,
+        mode: str | None = None,
+        alpha: float | None = None,
+        recency_bias: float | None = None,
+        graph_context: bool | None = None,
+        additional_context: str | None = None,
+        additional_graph_context: str | None = None,
+        context: str | None = None,
+        query_explicit_relations: bool | None = None,
+        query_forceful_relations: bool | None = None,
+        query_by: str | None = None,
+        titles: list[str] | None = None,
+        acl: list[str] | None = None,
+        follow_forceful_relations: bool | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> tuple[dict, str | None]:
+        """``POST /query`` against a physical UNIFIED database (PRO-1618).
+
+        Never sends ``type``: a unified database has one corpus, and the server
+        refuses ``knowledge``/``memory`` there. Unsupported request controls
+        use the wrapper's raw transport; published SDK schemas withhold them.
+
+        Returns ``(body, request_id)``. During rollout, the server can return
+        either the unified body or V2RetrievalResult for the same physical
+        layout. The body keeps its actual wire shape, dumped with
+        ``exclude_unset`` so no key is added by SDK defaults.
+        ``request_id`` is lifted from the envelope's ``meta`` for feedback.
+        Envelope warnings are preserved alongside the response payload.
+        """
+        kwargs = {
+            "database": self._w._require_database(database),
+            "collection": self._w._resolve_collection(collection),
+            "query": query,
+            "operator": operator,
+            "max_results": max_results,
+            "mode": mode,
+            "alpha": alpha,
+            "recency_bias": recency_bias,
+            "graph_context": graph_context,
+            **_query_controls(
+                query_explicit_relations=query_explicit_relations,
+                follow_forceful_relations=follow_forceful_relations,
+                query_forceful_relations=query_forceful_relations,
+                additional_graph_context=additional_graph_context,
+                additional_context=additional_context,
+                context=context,
+            ),
+            "query_by": query_by,
+            "titles": titles,
+            "acl": acl,
+        }
+        if any(
+            value is not None and key not in inspect.signature(self._w._sdk.query).parameters
+            for key, value in kwargs.items()
+        ):
+            envelope = self._w._raw_post(
+                "/query", json_body={k: v for k, v in kwargs.items() if v is not None}, unwrap=False, read_only=True
+            )
+            body = envelope
+            if isinstance(envelope, dict) and "data" in envelope and {"success", "meta", "error"} & envelope.keys():
+                body = _with_warnings(envelope["data"] or {}, envelope.get("meta"))
+            if not isinstance(body, dict):
+                raise HydraDBClientError(200, "Malformed query response: expected an object.")
+            return body, _request_id_of(envelope)
+        try:
+            resp = self._w._sdk.query(**{k: v for k, v in kwargs.items() if v is not None})
+        except ParsingError as exc:
+            # A successful answer the SDK's model rejects (it requires every
+            # list key, and the contract lets `forceful_relations` be absent)
+            # is still the server's answer: use it as sent, no second request.
+            envelope = exc.body if isinstance(exc.body, dict) else None
+            body = envelope.get("data") if envelope else None
+            if exc.status_code and 200 <= exc.status_code < 300:
+                if not isinstance(body, dict):
+                    raise HydraDBClientError(exc.status_code, "Malformed query response: expected an object.") from exc
+                return _with_warnings(body, envelope.get("meta")), _request_id_of(envelope)
+            raise translate_sdk_error(exc) from exc
+        except (ApiError, httpx.HTTPError) as exc:
+            raise translate_sdk_error(exc) from exc
+        data = getattr(resp, "data", None)
+        dump = getattr(data, "model_dump", None)
+        body = dump(mode="json", by_alias=True, exclude_unset=True) if callable(dump) else data
+        if not isinstance(body, dict):
+            raise HydraDBClientError(200, "Malformed query response: expected an object.")
+        return _with_warnings(body, getattr(resp, "meta", None)), _request_id_of(resp)
 
     def ingest(
         self,
@@ -358,6 +646,25 @@ class _Context(_Resource):
                 item["title"] = title
             app_knowledge = json.dumps([item])
 
+        if (
+            app_knowledge is not None
+            and "app_knowledge" not in inspect.signature(self._w._sdk.context.ingest).parameters
+        ):
+            return self._w._raw_post(
+                "/context/ingest",
+                form_body={
+                    key: value
+                    for key, value in {
+                        "database": self._w._require_database(database),
+                        "collection": self._w._resolve_collection(collection),
+                        "type": kind,
+                        "app_knowledge": app_knowledge,
+                        "document_metadata": document_metadata,
+                        "upsert": _bool_str(upsert),
+                    }.items()
+                    if value is not None
+                },
+            )
         resp = self._invoke(
             self._w._sdk.context.ingest,
             database=self._w._require_database(database),
@@ -370,6 +677,51 @@ class _Context(_Resource):
             upsert=_bool_str(upsert),
         )
         return _unwrap(resp)
+
+    def ingest_context(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        enrich: bool | None = None,
+        upsert: bool | None = None,
+        instructions: str | None = None,
+        database: str | None = None,
+        collection: str | None = None,
+    ) -> dict:
+        """``POST /context/ingest`` on a UNIFIED database (PRO-1618).
+
+        A JSON body whose ``context`` list holds items of exactly one ``text``
+        or one ``conversation`` each, in the contract's field names. No
+        ``type``, no multipart, none of the split-era fields. Items are sent as
+        given; ``enrich``/``upsert``/``instructions`` are the request-level
+        defaults for them and travel only when set.
+
+        Returns the 202 payload: ``results[].id`` is the item's
+        ``context_id`` (server-minted when the item carried none).
+        """
+        if not items:
+            raise ValueError("ingest_context needs at least one item")
+        if len(items) > UNIFIED_INGEST_MAX_ITEMS:
+            raise ValueError(f"at most {UNIFIED_INGEST_MAX_ITEMS} items per request, got {len(items)}")
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or ("text" in item) == ("conversation" in item):
+                raise ValueError(f"context[{index}] must carry exactly one of 'text' or 'conversation'")
+        # A JSON body, as the shared conformance vector `ingest-unified-json`
+        # requires. The SDK (2.1.6) can only send `context` as a multipart form
+        # field, so this one call stays on the raw path.
+        body: dict[str, Any] = {"database": self._w._require_database(database)}
+        coll = self._w._resolve_collection(collection)
+        if coll:
+            body["collection"] = coll
+        body["context"] = list(items)
+        if enrich is not None:
+            body["enrich"] = bool(enrich)
+        if upsert is not None:
+            body["upsert"] = bool(upsert)
+        if instructions is not None:
+            body["instructions"] = instructions
+        result = self._w._raw_post("/context/ingest", json_body=body)
+        return result if isinstance(result, dict) else {}
 
     def ingest_many(
         self,
@@ -397,6 +749,10 @@ class _Context(_Resource):
             merged["success_count"] += result.get("success_count") or 0
             merged["failed_count"] += result.get("failed_count") or 0
             merged["results"].extend(result.get("results") or [])
+            for key in ("warnings", "response_warnings"):
+                if key in result:
+                    warnings = result[key]
+                    merged.setdefault(key, []).extend(warnings if isinstance(warnings, list) else [warnings])
         return merged
 
     def list(
@@ -426,7 +782,11 @@ class _Context(_Resource):
         if isinstance(data, dict):
             inner = data.get("inner")
             if isinstance(inner, dict):
-                return inner
+                flattened = dict(inner)
+                for key in ("warnings", "response_warnings"):
+                    if key in data:
+                        _merge_warning_field(flattened, key, data[key])
+                return flattened
             if "inner" in data:
                 return {k: v for k, v in data.items() if k != "inner"}
         return data
@@ -980,6 +1340,9 @@ class HydraDB:
         self._token = token
         self._base_url = base_url or DEFAULT_BASE_URL
         self._timeout = timeout
+        # Storage layouts by database name, filled by the first
+        # ``databases.layouts()`` probe (PRO-1618). None until then.
+        self._layouts: dict[str, str] | None = None
         self.databases = _Databases(self)
         self.context = _Context(self)
         self.graph = _Graph(self)
@@ -1020,12 +1383,17 @@ class HydraDB:
 
         # Unwrap by SHAPE, never by assumption: the connector endpoints mostly
         # return bare objects rather than a HandlerEnvelope.
-        if isinstance(body, dict) and "data" in body and ({"success", "meta", "error"} & body.keys()):
-            data = body["data"]
-            return data if data is not None else {}
-        return body if body is not None else {}
+        return _unwrap_payload(body)
 
-    def _raw_post(self, path: str, *, json_body: Any) -> Any:
+    def _raw_post(
+        self,
+        path: str,
+        *,
+        json_body: Any = None,
+        form_body: dict | None = None,
+        unwrap: bool = True,
+        read_only: bool = False,
+    ) -> Any:
         """POST an endpoint the SDK cannot express, with the same error contract.
 
         The sibling of :meth:`_raw_get` (CONTRACT §2 rule 7). Same auth and
@@ -1036,15 +1404,29 @@ class HydraDB:
             "Authorization": f"Bearer {self._token}",
             "API-Version": "2",
         }
-        try:
-            response = httpx.post(
-                f"{self._base_url.rstrip('/')}{path}",
-                headers=headers,
-                json=json_body,
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise translate_sdk_error(exc) from exc
+        for attempt in range(3 if read_only else 1):
+            try:
+                response = httpx.post(
+                    f"{self._base_url.rstrip('/')}{path}",
+                    headers=headers,
+                    **(
+                        {"files": {key: (None, value) for key, value in form_body.items()}}
+                        if form_body is not None
+                        else {"json": json_body}
+                    ),
+                    timeout=self._timeout,
+                )
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                if read_only and attempt < 2:
+                    time.sleep(_query_retry_delay(None, attempt))
+                    continue
+                raise translate_sdk_error(exc) from exc
+            except httpx.HTTPError as exc:
+                raise translate_sdk_error(exc) from exc
+            if read_only and attempt < 2 and (response.status_code >= 500 or response.status_code in (408, 409, 429)):
+                time.sleep(_query_retry_delay(response, attempt))
+                continue
+            break
 
         try:
             body = response.json() if response.content else None
@@ -1054,15 +1436,12 @@ class HydraDB:
         if response.is_error:
             raise HydraDBClientError(response.status_code, _stringify_body(body))
 
-        return _unwrap_payload(body)
+        return _unwrap_payload(body) if unwrap else body
 
     def _require_database(self, database: str | None) -> str:
         db = database or self.default_database
         if not db or not str(db).strip():
-            raise HydraDBClientError(
-                0,
-                "No database specified. Use --database or run 'hydradb config set tenant_id <id>'.",
-            )
+            raise HydraDBClientError(0, NO_DATABASE_MESSAGE)
         return db
 
     def _resolve_collection(self, collection: str | None) -> str | None:
