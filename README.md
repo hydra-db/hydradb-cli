@@ -318,10 +318,9 @@ accepted. The canonical hint is a request string; the similarly
 named response map is read independently, canonical first and legacy second.
 Human output shows its chunks after the numbered results, each labelled `linked`,
 because they come from graph links rather than ranking.
-A canonical name always travels with its legacy twin carrying the same value
-(`query_explicit_relations` with `query_forceful_relations`,
-`additional_graph_context` with `additional_context`): servers that predate the
-rename ignore the canonical name silently, and renamed servers prefer it.
+Whichever flag sets them, each setting is sent once under its new name,
+`query_explicit_relations` and `additional_graph_context`. A server that
+predates the rename (hydradb-application #3665) ignores both settings.
 
 Published SDK schemas do not expose all unified or canonical request fields.
 The CLI keeps supported legacy calls on the SDK and uses its existing raw v2

@@ -309,7 +309,7 @@ class TestUnifiedQueryWrapper:
             "query_by": "text",
             "titles": ["Q3"],
             "acl": ["a@x.com"],
-            "follow_forceful_relations": False,
+            "query_explicit_relations": False,
         }
 
     def test_unset_fields_are_omitted_not_sent_as_null(self):

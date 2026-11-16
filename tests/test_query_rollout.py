@@ -131,7 +131,7 @@ def run_query(payload, transport, output="human", *, graph=False):
     assert raw.call_count == (1 if transport == "raw" else 0)
     assert sdk_query.call_count == (0 if transport == "raw" else 1)
     if transport == "raw":
-        assert sent["follow_forceful_relations"] is False
+        assert sent["query_explicit_relations"] is False and "follow_forceful_relations" not in sent
     if captured:
         assert captured["body"] == captured["snapshot"]
     return result

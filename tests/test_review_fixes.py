@@ -128,29 +128,29 @@ def test_markdown_on_unified_database_is_accepted_and_left_out_of_the_item():
     assert bodies[1]["context"] == [{"text": "# md", "enrich": True, "upsert": True}]
 
 
-# Canonical /query names travel with the legacy twin that pre-rename servers read.
+# Each renamed /query setting is sent once, under its new name, whichever flag set it.
+
+LEGACY_QUERY_NAMES = {"query_forceful_relations", "follow_forceful_relations", "additional_context", "context"}
 
 
 @pytest.mark.parametrize("layout", ["split", "unified"])
-def test_canonical_query_names_are_sent_with_their_legacy_twins(layout):
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--additional-graph-context", "hint", "--no-query-explicit-relations"],
+        ["--context", "hint", "--no-follow-forceful-relations"],
+        ["--additional-context", "hint", "--no-query-forceful-relations"],
+    ],
+    ids=["new-flags", "legacy-flags", "other-legacy-flags"],
+)
+def test_renamed_query_settings_are_sent_once_under_their_new_names(layout, flags):
     save_config(api_key="synthetic", database="db")
-    result, seen = invoke(
-        ["query", "x", "--additional_graph_context", "hint", "--no-query-explicit-relations"], layout=layout
-    )
+    result, seen = invoke(["query", "x", *flags], layout=layout)
     assert result.exit_code == 0, result.output
     sent = json.loads(seen["/query"][0].content)
-    assert sent["additional_graph_context"] == sent["additional_context"] == "hint"
-    assert sent["query_explicit_relations"] is False and sent["query_forceful_relations"] is False
-    assert "follow_forceful_relations" not in sent
-
-
-def test_legacy_query_names_alone_are_sent_unchanged():
-    save_config(api_key="synthetic", database="db")
-    result, seen = invoke(["query", "x", "--context", "hint", "--no-follow-forceful-relations"])
-    assert result.exit_code == 0, result.output
-    sent = json.loads(seen["/query"][0].content)
-    assert sent["additional_context"] == "hint" and "additional_graph_context" not in sent
-    assert sent["follow_forceful_relations"] is False and "query_explicit_relations" not in sent
+    assert sent["additional_graph_context"] == "hint"
+    assert sent["query_explicit_relations"] is False
+    assert not LEGACY_QUERY_NAMES & sent.keys()
 
 
 # D5: only a rejected key ends the command; any other probe failure falls back to split.
@@ -289,6 +289,14 @@ def test_untyped_split_query_sends_the_main_body():
     sent = json.loads(seen["/query"][0].content)
     assert sent == MAIN_SPLIT_QUERY
     assert "type" not in sent and "recency_bias" not in sent
+
+
+def test_split_query_hint_sends_the_main_body_except_the_hint_is_under_its_new_name():
+    # main sends this value as additional_context; the client now sends only the new name.
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x", "--context", "hint"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(seen["/query"][0].content) == {**MAIN_SPLIT_QUERY, "additional_graph_context": "hint"}
 
 
 def test_untyped_split_ingest_sends_the_main_body():

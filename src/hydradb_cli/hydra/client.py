@@ -110,33 +110,18 @@ def _query_controls(
     additional_context: str | None = None,
     context: str | None = None,
 ) -> dict[str, Any]:
-    """Select aliases by presence, keeping false and empty-string overrides."""
+    """Send each setting once under its new name, picking the first alias
+    present and keeping false and empty-string overrides."""
     controls: dict[str, Any] = {}
-    for key, value in (
-        ("query_explicit_relations", query_explicit_relations),
-        ("follow_forceful_relations", follow_forceful_relations),
-        ("query_forceful_relations", query_forceful_relations),
-    ):
-        if value is not None:
-            controls[key] = value
-            break
-    for key, value in (
-        ("additional_graph_context", additional_graph_context),
-        ("additional_context", additional_context),
-        ("additional_context", context),
-    ):
-        if value is not None:
-            controls[key] = value
-            break
-    # Servers that predate the rename ignore unknown /query fields without an
-    # error, so a canonical name alone would be dropped there. Renamed servers
-    # take the canonical name when both are present.
-    for canonical, legacy in (
-        ("query_explicit_relations", "query_forceful_relations"),
-        ("additional_graph_context", "additional_context"),
-    ):
-        if canonical in controls:
-            controls[legacy] = controls[canonical]
+    relations = next(
+        (v for v in (query_explicit_relations, follow_forceful_relations, query_forceful_relations) if v is not None),
+        None,
+    )
+    if relations is not None:
+        controls["query_explicit_relations"] = relations
+    hint = next((v for v in (additional_graph_context, additional_context, context) if v is not None), None)
+    if hint is not None:
+        controls["additional_graph_context"] = hint
     return controls
 
 

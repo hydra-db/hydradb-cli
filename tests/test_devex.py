@@ -219,9 +219,10 @@ def test_wire_alias_precedence_and_unsupported_fields_use_raw(unified):
             context="oldest",
         )
     sent = post.call_args.kwargs["json"]
-    assert sent["query_explicit_relations"] is sent["query_forceful_relations"] is False
-    assert sent["additional_graph_context"] == sent["additional_context"] == ""
-    assert not {"follow_forceful_relations", "context", "type", "recency_bias"} & sent.keys()
+    assert sent["query_explicit_relations"] is False
+    assert sent["additional_graph_context"] == ""
+    assert not {"follow_forceful_relations", "query_forceful_relations", "additional_context", "context"} & sent.keys()
+    assert not {"type", "recency_bias"} & sent.keys()
     w._sdk.query.assert_not_called()
     assert (result[0] if unified else result)["warnings"] == [WARNING]
 
@@ -415,13 +416,13 @@ def test_ingest_server_notices_survive_transport_to_cli(layout, output, payload_
 @pytest.mark.parametrize(
     "controls, expected",
     [
-        ({"follow_forceful_relations": False, "query_forceful_relations": True}, {"follow_forceful_relations": False}),
-        ({"query_forceful_relations": False}, {"query_forceful_relations": False}),
-        ({"additional_context": "", "context": "fallback"}, {"additional_context": ""}),
-        ({"additional_graph_context": None, "context": "old"}, {"additional_context": "old"}),
+        ({"follow_forceful_relations": False, "query_forceful_relations": True}, {"query_explicit_relations": False}),
+        ({"query_forceful_relations": False}, {"query_explicit_relations": False}),
+        ({"additional_context": "", "context": "fallback"}, {"additional_graph_context": ""}),
+        ({"additional_graph_context": None, "context": "old"}, {"additional_graph_context": "old"}),
     ],
 )
-def test_legacy_wire_aliases_retain_false_and_empty_string(controls, expected):
+def test_legacy_aliases_are_sent_under_the_new_name_keeping_false_and_empty_string(controls, expected):
     seen = []
 
     def handler(request):
