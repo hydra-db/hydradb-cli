@@ -222,3 +222,15 @@ def test_split_query_labels_linked_chunks_apart_from_ranked_results():
     assert "1 • 90%" in ranked
     assert "linked" in linked and "•" not in linked and "10%" not in linked
     assert "2 •" not in out
+
+
+# Requirement 10: a key-only user is pointed at listing or creating a database.
+
+
+@pytest.mark.parametrize("argv", [["query", "x"], ["ingest", "--text", "x"], ["list"]])
+def test_missing_database_error_names_list_and_create(argv):
+    save_config(api_key="synthetic")
+    result = runner.invoke(app, argv, env=ENV)
+    assert result.exit_code == 1, result.output
+    message = flat(result.stderr)
+    assert "hydradb database list" in message and "hydradb database create <name>" in message

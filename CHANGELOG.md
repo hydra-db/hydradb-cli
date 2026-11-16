@@ -45,6 +45,7 @@
 - **The scope notice appears only when a default chose the scope.** The `scope` record printed on stderr (and merged into `--output json`) on every context command, including when `--database` and `--collection` were both passed. It is now printed and merged only when the database or the collection came from a default; stdout stays one JSON document either way.
 - **Conflicting retrieval hints fail instead of dropping one.** `query --context old --additional-graph-context new` sent only `new` and discarded `old` behind a deprecation warning. Two hint flags with different values now exit 1 with a conflict message, as `--type` and `--kind` do; the same value for both is still accepted.
 - **Linked chunks are labelled as linked.** The human view of a split query numbered the `additional_graph_context` chunks among the ranked results, with their low scores, and counted them in "Found N result(s)". They now follow the ranked results labelled `linked`, without a rank or score, and the header counts them separately.
+- **The missing-database error points a key-only user at a next step.** It now also names `hydradb database list` and `hydradb database create <name>`, beside `--database` and `hydradb config set database <id>`.
 
 ### Internal
 

@@ -6,6 +6,7 @@ import httpx
 
 from hydradb_cli.config import get_api_key, get_base_url, get_collection, get_database, get_graph_collection
 from hydradb_cli.hydra import HydraDB, HydraDBClientError
+from hydradb_cli.hydra.client import NO_DATABASE_MESSAGE
 from hydradb_cli.output import print_error, set_scope_notice, warn_deprecated
 
 
@@ -28,7 +29,7 @@ def require_tenant_id(tenant_id: str | None = None) -> str:
     """Get the database (tenant) scope from argument, config, or exit with error."""
     tid = tenant_id or get_database()
     if not tid or not tid.strip():
-        print_error("No database specified. Use --database or run 'hydradb config set database <id>'.")
+        print_error(NO_DATABASE_MESSAGE)
     return tid  # type: ignore[return-value]
 
 

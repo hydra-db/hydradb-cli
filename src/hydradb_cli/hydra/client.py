@@ -37,6 +37,10 @@ from hydradb_cli.hydra.errors import HydraDBClientError, _stringify_body, transl
 # dependency on CLI configuration — the wrapper is meant to be portable.
 DEFAULT_BASE_URL = "https://api.hydradb.com"
 DEFAULT_GRAPH_COLLECTION = "default"
+NO_DATABASE_MESSAGE = (
+    "No database specified. Use --database or run 'hydradb config set database <id>'. "
+    "List your databases with 'hydradb database list', or create one with 'hydradb database create <name>'."
+)
 
 
 def _is_envelope(obj: Any) -> bool:
@@ -1452,10 +1456,7 @@ class HydraDB:
     def _require_database(self, database: str | None) -> str:
         db = database or self.default_database
         if not db or not str(db).strip():
-            raise HydraDBClientError(
-                0,
-                "No database specified. Use --database or run 'hydradb config set database <id>'.",
-            )
+            raise HydraDBClientError(0, NO_DATABASE_MESSAGE)
         return db
 
     def _resolve_collection(self, collection: str | None) -> str | None:
