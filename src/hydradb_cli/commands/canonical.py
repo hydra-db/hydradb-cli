@@ -210,7 +210,9 @@ def ingest(
         "--infer/--no-infer",
         help="Additional memory enrichment; disabling it leaves entity/graph processing enabled.",
     ),
-    markdown: bool = typer.Option(False, "--markdown", help="Treat text as markdown (split memory only)."),
+    markdown: bool = typer.Option(
+        False, "--markdown", help="Treat text as markdown (split memory only; refused for knowledge text)."
+    ),
     upsert: bool = typer.Option(True, "--upsert/--no-upsert", help="Update existing items with the same id."),
     conversation_file: str | None = typer.Option(
         None,
@@ -276,7 +278,10 @@ def ingest(
         if kind:
             print_error(f"Database '{db}' is unified: it has one corpus, so --type/--kind does not apply. Omit it.")
         if markdown:
-            print_error("--markdown does not apply on a unified database.")
+            print_error(
+                "--markdown does not apply on a unified database: a context item has no markdown flag, and "
+                "markdown in --text is stored as written. Run it again and drop --markdown."
+            )
         if conversation_file and text is not None:
             print_error("Pass exactly one of --text or --conversation-file.")
         if context_id and source_id and context_id != source_id:
@@ -340,6 +345,12 @@ def ingest(
             print_error("--infer/--no-infer does not apply to file ingest; pass files only.")
         _impl.do_ingest_knowledge_files(files, upsert=upsert, tenant_id=tid, sub_tenant_id=stid, layout=layout)
         return
+    if kind == "knowledge" and markdown:
+        print_error(
+            "--markdown does not apply to knowledge text: a knowledge item has no markdown flag, and markdown in "
+            "--text is stored as written. Drop --markdown, or save the text as a .md file and ingest the file "
+            "(hydradb ingest notes.md)."
+        )
     resolved = _resolve_text_input(text)
     if kind == "knowledge":
         _impl.do_ingest_knowledge_text(

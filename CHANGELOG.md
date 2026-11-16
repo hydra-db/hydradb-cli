@@ -38,6 +38,10 @@
 
 - **`HYDRADB_GRAPH_COLLECTION`** sets the default graph collection (default `default`). It deliberately does not fall back to `HYDRADB_COLLECTION`: a context collection names a memory/knowledge partition and means nothing to a graph, so inheriting it would silently point Cypher at a collection you never chose.
 
+### Fixed
+
+- **`ingest --type knowledge --markdown` is refused instead of exiting 0 without the flag.** A split knowledge item has no markdown flag (its `content.markdown` is a separate body slot the pipeline does not read as the text), and a unified context item has none either; the unified decoder rejects `is_markdown`. The command now exits 1 and says to drop `--markdown` or to ingest the text as a `.md` file. `--markdown` on a split memory still sends `is_markdown`.
+
 ### Internal
 
 - `HydraDB.graph` is a hand-rolled `httpx` path rather than an SDK call: the pinned `hydradb-sdk==2.1.2` exposes `context`, `databases`, `connectors` and `webhooks` and has no `byog` resource, so those endpoints are unreachable through it. It reuses the wrapper's existing envelope unwrapping and error translation and raises the same `HydraDBClientError`, so `handle_api_error` treats a BYOG failure exactly like an SDK one. When the SDK grows a `byog` resource, that one class is reimplemented over it and no caller changes. The exact SDK pin (CONTRACT S2 rule 1) is unaffected — there is no generated name to be insulated from yet.
