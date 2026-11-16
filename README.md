@@ -310,9 +310,11 @@ CLI scope notice and any envelope warnings.
 `--kind` remains a deprecated alias for `--type`; invalid values or conflicting
 selectors fail locally. Relation aliases use this precedence, including explicit
 false: `query_explicit_relations` > `follow_forceful_relations` >
-`query_forceful_relations` > the server default (`true`). Hint precedence is
-`--additional-graph-context` > `--additional-context` > `--context`, including an
-explicit empty string. The canonical hint is a request string; the similarly
+`query_forceful_relations` > the server default (`true`). The hint flags
+`--additional-graph-context`, `--additional-context` and `--context` must agree:
+two of them with different values (an explicit empty string included) fail
+locally as a conflict, the way `--type` and `--kind` do, and equal values are
+accepted. The canonical hint is a request string; the similarly
 named response map is read independently, canonical first and legacy second.
 A canonical name always travels with its legacy twin carrying the same value
 (`query_explicit_relations` with `follow_forceful_relations`,

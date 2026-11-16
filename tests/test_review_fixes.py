@@ -181,3 +181,22 @@ def test_scope_notice_is_reported_when_a_scope_came_from_a_default(scope_args, e
     assert machine.exit_code == 0, machine.output
     body = json.loads(machine.stdout)
     assert body["scope"] == {"database": "db", "collection": "col", **expected}
+
+
+# D6: a legacy hint that disagrees with --additional_graph_context is a conflict.
+
+
+@pytest.mark.parametrize("legacy", ["--context", "--additional-context"])
+def test_conflicting_query_hints_exit_with_a_conflict(legacy):
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x", legacy, "old", "--additional_graph_context", "new"])
+    assert result.exit_code == 1, result.output
+    assert "conflict" in result.stderr and "--additional-graph-context" in result.stderr
+    assert "/query" not in seen
+
+
+def test_matching_query_hints_are_accepted():
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x", "--context", "same", "--additional_graph_context", "same"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(seen["/query"][0].content)["additional_graph_context"] == "same"

@@ -180,8 +180,6 @@ def test_canonical_query_controls_and_legacy_false(layout):
                 "--follow-forceful-relations",
                 "--additional-graph-context",
                 "",
-                "--context",
-                "legacy",
             ],
         )
         assert result.exit_code == 0, result.output

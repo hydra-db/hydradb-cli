@@ -120,6 +120,17 @@ def query(
 ) -> None:
     """Query knowledge or memories — the single retrieval entry point."""
     kind = _resolve_type(type_, kind, query=True)
+    hints = {
+        flag: value
+        for flag, value in (
+            ("--additional-graph-context", additional_graph_context),
+            ("--additional-context", additional_context),
+            ("--context", context),
+        )
+        if value is not None
+    }
+    if len(set(hints.values())) > 1:
+        print_error(f"{' and '.join(hints)} conflict; pass one retrieval hint or the same value for each.")
     if context is not None:
         warn_deprecated("--context", "--additional-graph-context")
     if additional_context is not None:
