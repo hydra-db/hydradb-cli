@@ -102,18 +102,12 @@ def _execute(spinner_msg: str, call: Callable[[], Any]) -> Any:
 # ── storage layout (PRO-1618) ────────────────────────────────────────────────
 
 
-#: The layout probe could not answer (network, timeout, 429 or 5xx). The
-#: command then goes out in the split shape, which is what every database
-#: predating PRO-1618 takes and what the CLI sent before layouts existed, and
-#: is redone in the unified shape if the database refuses it as unified.
+#: The layout probe could not answer (network, timeout, or any HTTP failure
+#: but 401). The command then goes out in the split shape, which is what every
+#: database predating PRO-1618 takes and what the CLI sent before layouts
+#: existed, and is redone in the unified shape if the database refuses it as
+#: unified.
 LAYOUT_UNKNOWN = "unknown"
-
-
-def _probe_failure_is_transient(e: HydraDBClientError) -> bool:
-    """A probe failure the command itself may not hit: the server could not
-    answer the layout question just now. An auth or permission failure is not
-    one; the command's own call would fail the same way, so it is reported."""
-    return e.status_code == 0 or e.status_code == 429 or e.status_code >= 500
 
 
 def _layout(wrapper: Any, database: str) -> str:
@@ -121,17 +115,19 @@ def _layout(wrapper: Any, database: str) -> str:
 
     One memoised ``GET /databases`` probe per wrapper. A successful probe that
     does not list ``database`` reads as split, which is what every
-    pre-PRO-1618 database is. A transient probe failure reads as unknown, with
-    a warning on stderr; any other failure is the error it is. Compared by
-    value so a mocked wrapper (whose ``layout`` returns a MagicMock) reads as
-    split. Every command branches on THIS, never on a request flag: a unified
-    database never receives ``type``, and a split one keeps every existing
-    call as is.
+    pre-PRO-1618 database is. A failed probe reads as unknown, with a warning
+    on stderr, except 401: a rejected key fails the command's own call too, so
+    that one is reported. A key may be allowed the command yet refused
+    ``GET /databases`` (403, 404), and that must not cost it the command.
+    Compared by value so a mocked wrapper (whose ``layout`` returns a
+    MagicMock) reads as split. Every command branches on THIS, never on a
+    request flag: a unified database never receives ``type``, and a split one
+    keeps every existing call as is.
     """
     try:
         return LAYOUT_UNIFIED if wrapper.databases.layout(database) == LAYOUT_UNIFIED else LAYOUT_SPLIT
     except HydraDBClientError as e:
-        if not _probe_failure_is_transient(e):
+        if e.status_code == 401:
             handle_api_error(e)
         reason = f"HTTP {e.status_code}" if e.status_code else "no response"
     except httpx.RequestError as e:

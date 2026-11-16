@@ -127,3 +127,23 @@ def test_legacy_query_names_alone_are_sent_unchanged():
     sent = json.loads(seen["/query"][0].content)
     assert sent["additional_context"] == "hint" and "additional_graph_context" not in sent
     assert sent["follow_forceful_relations"] is False and "query_explicit_relations" not in sent
+
+
+# D5: only a rejected key ends the command; any other probe failure falls back to split.
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_layout_probe_refusal_falls_back_to_split_instead_of_failing(status):
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x"], probe_status=status)
+    assert result.exit_code == 0, result.output
+    assert f"HTTP {status}" in result.stderr and "sending the split request" in flat(result.stderr)
+    assert json.loads(seen["/query"][0].content)["type"] == "all"
+
+
+def test_layout_probe_401_still_ends_the_command():
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x"], probe_status=401)
+    assert result.exit_code == 1, result.output
+    assert "Authentication failed" in result.stderr
+    assert "/query" not in seen
