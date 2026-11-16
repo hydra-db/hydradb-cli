@@ -216,9 +216,12 @@ config. Login alone does not select a database: use `--database` or
 | `--database` / `-d` | Database to operate on |
 | `--collection` | Collection (partition) within the database |
 
-Context command responses include a machine-readable client scope notice in JSON
-mode, alongside any server warnings. It reports the database and collection and
-whether each came from an explicit flag or a configured default. An omitted
+When the database or the collection for a context command came from a default
+(your saved config, or the server's default collection), the response includes a
+machine-readable client scope notice in JSON mode, alongside any server warnings.
+It reports the database and collection and whether each came from an explicit
+flag or a default. Passing both `--database` and `--collection` leaves no default
+to report, so no notice is printed or added. An omitted
 collection remains omitted on the wire and is reported as `null` with
 `collection_source: "server_default"`; the CLI does not guess the server's
 collection name. Human output and `--llm` put this notice on stderr, leaving a

@@ -147,3 +147,37 @@ def test_layout_probe_401_still_ends_the_command():
     assert result.exit_code == 1, result.output
     assert "Authentication failed" in result.stderr
     assert "/query" not in seen
+
+
+# Scope notice only when the database or collection came from a default.
+
+
+@pytest.mark.parametrize("output", ["human", "json"])
+def test_scope_notice_is_silent_when_both_scopes_are_explicit(output):
+    save_config(api_key="synthetic", database="configured", collection="configured-col")
+    argv = ["query", "x", "--database", "db", "--collection", "col"]
+    result, _ = invoke(["-o", "json", *argv] if output == "json" else argv)
+    assert result.exit_code == 0, result.output
+    assert "scope:" not in result.stderr
+    if output == "json":
+        body = json.loads(result.stdout)
+        assert "scope" not in body and "cli_scope" not in body
+
+
+@pytest.mark.parametrize(
+    "scope_args, expected",
+    [
+        ([], {"database_source": "default", "collection_source": "default"}),
+        (["--database", "db"], {"database_source": "explicit", "collection_source": "default"}),
+        (["--collection", "col"], {"database_source": "default", "collection_source": "explicit"}),
+    ],
+)
+def test_scope_notice_is_reported_when_a_scope_came_from_a_default(scope_args, expected):
+    save_config(api_key="synthetic", database="db", collection="col")
+    human, _ = invoke(["query", "x", *scope_args])
+    assert human.exit_code == 0, human.output
+    assert "scope:" in human.stderr
+    machine, _ = invoke(["-o", "json", "query", "x", *scope_args])
+    assert machine.exit_code == 0, machine.output
+    body = json.loads(machine.stdout)
+    assert body["scope"] == {"database": "db", "collection": "col", **expected}

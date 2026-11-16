@@ -50,8 +50,14 @@ def set_output_format(fmt: str) -> None:
 
 
 def set_scope_notice(database: str, collection: str | None, *, database_source: str, collection_source: str) -> None:
-    """Record resolved context scope without inventing an omitted collection."""
+    """Record resolved context scope without inventing an omitted collection.
+
+    Nothing is recorded when the caller passed both scopes: the notice exists to
+    say a default was used, and there is none to report."""
     global _scope_notice
+    if database_source == "explicit" and collection_source == "explicit":
+        _scope_notice = None
+        return
     _scope_notice = {
         "database": database,
         "collection": collection,

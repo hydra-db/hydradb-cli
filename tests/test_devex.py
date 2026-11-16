@@ -92,12 +92,7 @@ def test_default_query_and_scope_switch_are_machine_readable():
         assert w.context.query.call_args.kwargs["kind"] == "all"
         assert w.context.query.call_args.kwargs["recency_bias"] == 0.6
         result = runner.invoke(app, ["-o", "json", "query", "x", "--database", "other", "--collection", "other-col"])
-        assert json.loads(result.stdout)["scope"] == {
-            "database": "other",
-            "collection": "other-col",
-            "database_source": "explicit",
-            "collection_source": "explicit",
-        }
+        assert "scope" not in json.loads(result.stdout)
         assert w.context.query.call_args.kwargs["database"] == "other"
     assert get_database() == "configured"
 
