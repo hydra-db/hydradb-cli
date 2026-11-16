@@ -227,9 +227,7 @@ def ingest(
         "--enrich/--no-enrich",
         help="Unified databases: additional memory enrichment; disabling it leaves entity/graph processing enabled. --no-infer means the same there.",
     ),
-    instructions: str | None = typer.Option(
-        None, "--instructions", help="Unified databases: steer enrichment for this item."
-    ),
+    instructions: str | None = typer.Option(None, "--instructions", hidden=True),
     happened_at: str | None = typer.Option(
         None, "--happened-at", help="Unified databases: the event date the item is about, YYYY-MM-DD."
     ),

@@ -11,7 +11,7 @@ from hydradb_cli.main import app
     "command, option, next_option",
     [
         (["ingest"], "--infer", "--markdown"),
-        (["ingest"], "--enrich", "--instructions"),
+        (["ingest"], "--enrich", "--happened-at"),
         (["memories", "add"], "--infer", "--markdown"),
     ],
     ids=["canonical-infer", "canonical-enrich", "legacy-infer"],
