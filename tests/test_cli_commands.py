@@ -268,13 +268,15 @@ class TestIngest:
             result = runner.invoke(app, ["ingest", str(f), "--text", "x"])
         assert result.exit_code != 0
 
-    def test_ingest_files_with_markdown_fails(self, tmp_path):
+    def test_ingest_files_with_markdown_uploads_the_files_unchanged(self, tmp_path):
         _auth()
         f = tmp_path / "a.txt"
         f.write_text("aaa")
-        with _patch_wrapper(_wrapper()):
+        w = _wrapper(**{"context.ingest_many": {"success_count": 1, "failed_count": 0, "results": []}})
+        with _patch_wrapper(w):
             result = runner.invoke(app, ["ingest", str(f), "--markdown"])
-        assert result.exit_code != 0
+        assert result.exit_code == 0, result.output
+        assert "markdown" not in w.context.ingest_many.call_args.kwargs
 
     def test_ingest_files_with_no_infer_fails(self, tmp_path):
         _auth()

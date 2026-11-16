@@ -973,9 +973,9 @@ class TestUnifiedIngestCommand:
         w.context.ingest_many.assert_not_called()
         w.context.ingest_context.assert_not_called()
 
-    def test_kind_and_markdown_are_refused(self):
+    def test_kind_is_refused(self):
         _auth()
-        for extra in (["--kind", "memory"], ["--kind", "knowledge"], ["--markdown"]):
+        for extra in (["--kind", "memory"], ["--kind", "knowledge"]):
             w = _mock("unified")
             with _patch(w):
                 result = runner.invoke(app, ["ingest", "--text", "x", *extra])

@@ -391,7 +391,7 @@ There is no content classifier, and disabling enrichment does not select a corpu
 | `--source-id` | Client-assigned source identifier (the `--context-id` on a unified database) |
 | `--user-name` | Who is speaking (split: memory only; unified: any item, sent as `user_name`) |
 | `--infer` / `--no-infer` | Additional memory enrichment (default on); disabling it leaves entity/graph processing enabled |
-| `--markdown` | Treat text as markdown (split memory only). Refused for knowledge text, which has no markdown flag: drop it, or ingest a `.md` file |
+| `--markdown` | Treat text as markdown |
 | `--upsert` / `--no-upsert` | Update existing items with the same id (default on) |
 
 ```bash
@@ -404,13 +404,15 @@ hydradb ingest ./contract.pdf ./notes.docx
 echo "piped note" | hydradb ingest
 ```
 
-`--text`, `--title`, `--source-id`, `--user-name`, `--markdown` and `--no-infer` do not
-apply to file ingest and are rejected rather than silently ignored.
+`--text`, `--title`, `--source-id`, `--user-name` and `--no-infer` do not
+apply to file ingest and are rejected rather than silently ignored. `--markdown` is
+accepted on every ingest and sent only as a split memory's `is_markdown`; elsewhere
+there is no field for it and the request is the same as without it.
 
 On a **unified database** `ingest` sends one JSON context item (exactly one of
-`--text` or `--conversation-file`) and never a `type`. Files, `--type` and
-`--markdown` are refused there with a message (a context item has no markdown
-flag; markdown in `--text` is stored as written); `--user-name` names the speaker.
+`--text` or `--conversation-file`) and never a `type`. Files and `--type` are
+refused there with a message; `--markdown` is accepted and left out of the item,
+which has no markdown field; `--user-name` names the speaker.
 These options apply there and are refused on a split database:
 
 | Option | Description |

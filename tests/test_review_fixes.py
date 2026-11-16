@@ -77,33 +77,55 @@ def flat(text: str) -> str:
     return " ".join(text.split())
 
 
-# D3: --markdown on knowledge text has no field to travel in, so it is refused, never dropped.
+# --markdown is accepted on every ingest path and only travels where a split memory has the flag.
+
+MAIN_SPLIT_KNOWLEDGE_TEXT = {
+    "database": "db",
+    "collection": "col",
+    "type": "knowledge",
+    "app_knowledge": [{"id": "", "content": {"text": "# md"}}],
+}
 
 
 @pytest.mark.parametrize("probe_status", [200, 503], ids=["split", "layout-unknown"])
-def test_markdown_knowledge_text_is_refused_instead_of_silently_dropped(probe_status):
+def test_markdown_knowledge_text_is_accepted_and_sends_the_main_body(probe_status):
     save_config(api_key="synthetic", database="db")
-    result, seen = invoke(["ingest", "--type", "knowledge", "--markdown", "--text", "# md"], probe_status=probe_status)
-    assert result.exit_code == 1, result.output
-    assert "/context/ingest" not in seen
-    message = flat(result.stderr)
-    assert "--markdown" in message and ".md file" in message and "hydradb ingest notes.md" in message
+    for extra in ([], ["--markdown"]):
+        result, seen = invoke(["ingest", "--type", "knowledge", *extra, "--text", "# md"], probe_status=probe_status)
+        assert result.exit_code == 0, result.output
+        assert "markdown" not in result.stderr
+        fields = form_fields(seen["/context/ingest"][0])
+        fields["app_knowledge"] = json.loads(fields["app_knowledge"])
+        assert fields == MAIN_SPLIT_KNOWLEDGE_TEXT, extra
 
 
-def test_markdown_on_unified_database_is_refused_with_what_to_do_instead():
+def test_markdown_knowledge_file_is_accepted_and_sends_the_same_upload(tmp_path):
     save_config(api_key="synthetic", database="db")
-    result, seen = invoke(["ingest", "--markdown", "--text", "# md"], layout="unified")
-    assert result.exit_code == 1, result.output
-    assert "/context/ingest" not in seen
-    assert "drop --markdown" in flat(result.stderr)
+    note = tmp_path / "a.txt"
+    note.write_text("hi")
+    for extra in ([], ["--markdown"]):
+        result, seen = invoke(["ingest", *extra, str(note)])
+        assert result.exit_code == 0, result.output
+        assert "markdown" not in result.stderr
+        assert form_fields(seen["/context/ingest"][0]) == {
+            "database": "db",
+            "collection": "col",
+            "type": "knowledge",
+            "upsert": "true",
+            "documents": "hi",
+        }, extra
 
 
-def test_markdown_memory_text_still_sends_the_flag():
+def test_markdown_on_unified_database_is_accepted_and_left_out_of_the_item():
     save_config(api_key="synthetic", database="db")
-    result, seen = invoke(["ingest", "--markdown", "--text", "# md"])
-    assert result.exit_code == 0, result.output
-    body = seen["/context/ingest"][0].content.decode()
-    assert '"is_markdown": true' in body
+    bodies = []
+    for extra in ([], ["--markdown"]):
+        result, seen = invoke(["ingest", *extra, "--text", "# md"], layout="unified")
+        assert result.exit_code == 0, result.output
+        assert "markdown" not in result.stderr
+        bodies.append(json.loads(seen["/context/ingest"][0].content))
+    assert bodies[0] == bodies[1]
+    assert bodies[1]["context"] == [{"text": "# md", "enrich": True, "upsert": True}]
 
 
 # Canonical /query names travel with the legacy twin that pre-rename servers read.
@@ -276,6 +298,16 @@ def test_untyped_split_ingest_sends_the_main_body():
     fields = form_fields(seen["/context/ingest"][0])
     fields["memories"] = json.loads(fields["memories"])
     assert fields == MAIN_SPLIT_INGEST
+
+
+def test_split_markdown_memory_sends_the_main_body():
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["ingest", "--markdown", "--text", "note one"])
+    assert result.exit_code == 0, result.output
+    assert "markdown" not in result.stderr
+    fields = form_fields(seen["/context/ingest"][0])
+    fields["memories"] = json.loads(fields["memories"])
+    assert fields == {**MAIN_SPLIT_INGEST, "memories": [{"text": "note one", "infer": True, "is_markdown": True}]}
 
 
 @pytest.mark.parametrize(
