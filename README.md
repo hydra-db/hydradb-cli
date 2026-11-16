@@ -316,6 +316,8 @@ two of them with different values (an explicit empty string included) fail
 locally as a conflict, the way `--type` and `--kind` do, and equal values are
 accepted. The canonical hint is a request string; the similarly
 named response map is read independently, canonical first and legacy second.
+Human output shows its chunks after the numbered results, each labelled `linked`,
+because they come from graph links rather than ranking.
 A canonical name always travels with its legacy twin carrying the same value
 (`query_explicit_relations` with `follow_forceful_relations`,
 `additional_graph_context` with `additional_context`): servers that predate the

@@ -515,37 +515,40 @@ def _format_query_result(r: dict, request_id: str | None = None):
         return _format_unified_query_result(r, request_id)
     hint = _feedback_hint({"request_id": request_id})
     chunks = list(r.get("chunks") or [])
-    linked = r.get("additional_graph_context")
-    if not isinstance(linked, dict):
-        linked = r.get("additional_context")
-    if isinstance(linked, dict):
-        for value in linked.values():
+    linked_map = r.get("additional_graph_context")
+    if not isinstance(linked_map, dict):
+        linked_map = r.get("additional_context")
+    linked: list[dict] = []
+    if isinstance(linked_map, dict):
+        for value in linked_map.values():
             if isinstance(value, list):
-                chunks.extend(chunk for chunk in value if isinstance(chunk, dict))
+                linked.extend(chunk for chunk in value if isinstance(chunk, dict))
             elif isinstance(value, dict):
-                chunks.append(value)
-    if not chunks:
+                linked.append(value)
+    if not chunks and not linked:
         return "[dim]No relevant results found.[/dim]" + hint
+
+    def chunk_panel(chunk: dict, label: str, border_style: str) -> Panel:
+        title_text = chunk.get("source_title", "")
+        title_str = f" — {title_text}" if title_text else ""
+        content = chunk.get("chunk_content", "") or ""
+        preview = content[:300] + "..." if len(content) > 300 else content
+        return Panel(
+            preview,
+            title=f"{label}{title_str}",
+            title_align="left",
+            border_style=border_style,
+            padding=(0, 1),
+        )
 
     panels: list[Any] = []
     for i, chunk in enumerate(chunks, 1):
         score = chunk.get("relevancy_score")
         score_str = f" • {score:.0%}" if score is not None else ""
-        title_text = chunk.get("source_title", "")
-        title_str = f" — {title_text}" if title_text else ""
-
-        content = chunk.get("chunk_content", "") or ""
-        preview = content[:300] + "..." if len(content) > 300 else content
-
-        panels.append(
-            Panel(
-                preview,
-                title=f"[bold]{i}[/bold]{score_str}{title_str}",
-                title_align="left",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        )
+        panels.append(chunk_panel(chunk, f"[bold]{i}[/bold]{score_str}", "cyan"))
+    # Linked chunks reached the response through graph links from the ranked
+    # results, not by ranking, so their scores are not comparable to the ranks.
+    panels.extend(chunk_panel(chunk, "[dim]linked[/dim]", "dim") for chunk in linked)
 
     graph = r.get("graph_context") or {}
     query_paths = graph.get("query_paths", []) if isinstance(graph, dict) else []
@@ -555,7 +558,8 @@ def _format_query_result(r: dict, request_id: str | None = None):
     if hint:
         panels.append(Text.from_markup(hint.lstrip("\n")))
 
-    header = Text(f"  Found {len(chunks)} result(s)", style="bold")
+    linked_note = f", plus {len(linked)} linked chunk(s)" if linked else ""
+    header = Text(f"  Found {len(chunks)} result(s){linked_note}", style="bold")
     return Group(header, *panels)
 
 

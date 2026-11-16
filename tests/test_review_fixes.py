@@ -200,3 +200,25 @@ def test_matching_query_hints_are_accepted():
     result, seen = invoke(["query", "x", "--context", "same", "--additional_graph_context", "same"])
     assert result.exit_code == 0, result.output
     assert json.loads(seen["/query"][0].content)["additional_graph_context"] == "same"
+
+
+# D6: linked chunks are labelled as linked, not ranked among the results.
+
+
+def test_split_query_labels_linked_chunks_apart_from_ranked_results():
+    save_config(api_key="synthetic", database="db")
+    data = {
+        "chunks": [{"chunk_content": "ranked body", "relevancy_score": 0.9, "source_title": "Ranked"}],
+        "additional_graph_context": {
+            "uuid-1": {"chunk_content": "linked body", "relevancy_score": 0.1, "source_title": "Linked"}
+        },
+    }
+    result, _ = invoke(["query", "x"], query_data=data)
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "Found 1 result(s)" in out
+    titles = [line for line in out.splitlines() if "Ranked" in line or "Linked" in line]
+    ranked, linked = (next(line for line in titles if word in line) for word in ("Ranked", "Linked"))
+    assert "1 • 90%" in ranked
+    assert "linked" in linked and "•" not in linked and "10%" not in linked
+    assert "2 •" not in out
