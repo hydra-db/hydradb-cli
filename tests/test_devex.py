@@ -226,9 +226,9 @@ def test_wire_alias_precedence_and_unsupported_fields_use_raw(unified):
             context="oldest",
         )
     sent = post.call_args.kwargs["json"]
-    assert sent["query_explicit_relations"] is False
-    assert sent["additional_graph_context"] == ""
-    assert not {"follow_forceful_relations", "query_forceful_relations", "additional_context", "context"} & sent.keys()
+    assert sent["query_explicit_relations"] is sent["follow_forceful_relations"] is False
+    assert sent["additional_graph_context"] == sent["additional_context"] == ""
+    assert not {"query_forceful_relations", "context"} & sent.keys()
     assert ("type" not in sent) if unified else sent["type"] == "all"
     w._sdk.query.assert_not_called()
     assert (result[0] if unified else result)["warnings"] == [WARNING]

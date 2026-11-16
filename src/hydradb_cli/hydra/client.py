@@ -124,6 +124,15 @@ def _query_controls(
         if value is not None:
             controls[key] = value
             break
+    # Servers that predate the rename ignore unknown /query fields without an
+    # error, so a canonical name alone would be dropped there. Renamed servers
+    # take the canonical name when both are present.
+    for canonical, legacy in (
+        ("query_explicit_relations", "follow_forceful_relations"),
+        ("additional_graph_context", "additional_context"),
+    ):
+        if canonical in controls:
+            controls[legacy] = controls[canonical]
     return controls
 
 

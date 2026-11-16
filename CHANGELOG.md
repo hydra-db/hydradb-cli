@@ -41,6 +41,7 @@
 ### Fixed
 
 - **`ingest --type knowledge --markdown` is refused instead of exiting 0 without the flag.** A split knowledge item has no markdown flag (its `content.markdown` is a separate body slot the pipeline does not read as the text), and a unified context item has none either; the unified decoder rejects `is_markdown`. The command now exits 1 and says to drop `--markdown` or to ingest the text as a `.md` file. `--markdown` on a split memory still sends `is_markdown`.
+- **Canonical `/query` names travel with their legacy twins.** Servers that predate the rename (production today, and customer-hosted deployments) ignore unknown `/query` fields without an error, so `--additional-graph-context` and `--query-explicit-relations` alone were silently dropped there. The request now also carries `additional_context` and `follow_forceful_relations` with the same value; renamed servers take the canonical name when both are present.
 
 ### Internal
 

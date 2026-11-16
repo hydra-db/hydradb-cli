@@ -311,6 +311,10 @@ false: `query_explicit_relations` > `follow_forceful_relations` >
 `--additional-graph-context` > `--additional-context` > `--context`, including an
 explicit empty string. The canonical hint is a request string; the similarly
 named response map is read independently, canonical first and legacy second.
+A canonical name always travels with its legacy twin carrying the same value
+(`query_explicit_relations` with `follow_forceful_relations`,
+`additional_graph_context` with `additional_context`): servers that predate the
+rename ignore the canonical name silently, and renamed servers prefer it.
 
 Published SDK schemas do not expose all unified or canonical request fields.
 The CLI keeps supported legacy calls on the SDK and uses its existing raw v2

@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import httpx
@@ -102,3 +103,27 @@ def test_markdown_memory_text_still_sends_the_flag():
     assert result.exit_code == 0, result.output
     body = seen["/context/ingest"][0].content.decode()
     assert '"is_markdown": true' in body
+
+
+# Canonical /query names travel with the legacy twin that pre-rename servers read.
+
+
+@pytest.mark.parametrize("layout", ["split", "unified"])
+def test_canonical_query_names_are_sent_with_their_legacy_twins(layout):
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(
+        ["query", "x", "--additional_graph_context", "hint", "--no-query-explicit-relations"], layout=layout
+    )
+    assert result.exit_code == 0, result.output
+    sent = json.loads(seen["/query"][0].content)
+    assert sent["additional_graph_context"] == sent["additional_context"] == "hint"
+    assert sent["query_explicit_relations"] is False and sent["follow_forceful_relations"] is False
+
+
+def test_legacy_query_names_alone_are_sent_unchanged():
+    save_config(api_key="synthetic", database="db")
+    result, seen = invoke(["query", "x", "--context", "hint", "--no-follow-forceful-relations"])
+    assert result.exit_code == 0, result.output
+    sent = json.loads(seen["/query"][0].content)
+    assert sent["additional_context"] == "hint" and "additional_graph_context" not in sent
+    assert sent["follow_forceful_relations"] is False and "query_explicit_relations" not in sent
