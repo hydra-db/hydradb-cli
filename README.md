@@ -294,9 +294,8 @@ shape below. Both can carry a string `llm_prompt`; rendering follows the actual
 response body, not the physical layout or the prompt's presence.
 
 The unified body contains `chunks[]`
-(`context_id`, `score`, `content`, `enrichment` as a plain string and
-`enrichment_kind` beside it, the declared category, either one omitted when
-empty), `graph[]` (`origin`, `path_summary` plus triplets),
+(`context_id`, `score`, `content`, `enrichment` as a plain string, omitted
+when empty), `graph[]` (`origin`, `path_summary` plus triplets),
 `forceful_relations[]` (chunks pulled in by relations declared at ingest, each
 `chunk` in the same shape as a `chunks[]` item) and `llm_prompt`, a markdown
 document (`# Query results`, `## Results`, `## Forceful relations`,
@@ -422,13 +421,12 @@ These options apply there and are refused on a split database:
 | `--happened-at` | The event date the item is about, `YYYY-MM-DD` |
 | `--attributes` | Declared, filterable attributes as a JSON object |
 | `--custom-attributes` | Free-form attributes as a JSON object |
-| `--category` | `auto`, `user_preference`, `business_knowledge` or `decision_trace` |
 | `--forceful-relation` | A context id this item is declared related to; repeatable |
 | `--acl` | A principal allowed to retrieve the item; repeatable |
 
 ```bash
 hydradb ingest --text "Refund policy: 30-day window." --context-id policy-1 --title "Refund policy" \
-  --happened-at 2026-07-29 --attributes '{"team": "support"}' --category business_knowledge
+  --happened-at 2026-07-29 --attributes '{"team": "support"}'
 hydradb ingest --conversation-file ./chat.json --context-id chat-w1 --forceful-relation policy-1
 ```
 

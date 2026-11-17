@@ -254,11 +254,6 @@ def ingest(
     custom_attributes: str | None = typer.Option(
         None, "--custom-attributes", help="Unified databases: free-form attributes as a JSON object."
     ),
-    category: str | None = typer.Option(
-        None,
-        "--category",
-        help="Unified databases: context_category label: 'auto', 'user_preference', 'business_knowledge' or 'decision_trace'.",
-    ),
     forceful_relation: list[str] | None = typer.Option(
         None,
         "--forceful-relation",
@@ -309,7 +304,6 @@ def ingest(
             happened_at=happened_at,
             attributes=attributes,
             custom_attributes=custom_attributes,
-            category=category,
             forceful_relations=list(forceful_relation) if forceful_relation else None,
             acl=list(acl) if acl else None,
             upsert=upsert,
@@ -329,7 +323,6 @@ def ingest(
         "--happened-at": happened_at,
         "--attributes": attributes,
         "--custom-attributes": custom_attributes,
-        "--category": category,
         "--forceful-relation": forceful_relation,
         "--acl": acl,
     }

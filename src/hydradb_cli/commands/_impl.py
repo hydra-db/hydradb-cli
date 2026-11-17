@@ -57,9 +57,8 @@ VALID_RATINGS = {"positive", "negative", "neutral"}
 # "agnet" is worth catching before it costs one.
 VALID_SOURCES = {"user", "agent"}
 VALID_FETCH_MODES = {"content", "url", "both"}
-# Unified ingest (PRO-1618): the context_category labels and conversation roles
-# the server accepts. Validated locally for the same reason --rating is.
-VALID_CATEGORIES = {"auto", "user_preference", "business_knowledge", "decision_trace"}
+# Unified ingest (PRO-1618): the conversation roles the server accepts.
+# Validated locally for the same reason --rating is.
 VALID_ROLES = {"user", "assistant", "system"}
 # happened_at is a calendar date, YYYY-MM-DD only: no time, no zone.
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -296,13 +295,11 @@ def _pct(score: Any) -> str:
 
 
 def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
-    """One ``chunks[]`` item: context_id, score, content, enrichment and
-    enrichment_kind, temporal facts. ``enrichment`` is a plain string and
-    ``enrichment_kind`` its sibling (the declared context_category); either
-    can be absent, and a kind with no enrichment is still shown. Content and
-    enrichment are shown whole, never trimmed (the unified answer is not
-    compacted anywhere). Content is API data, so it is rendered as plain Text
-    and never parsed as markup."""
+    """One ``chunks[]`` item: context_id, score, content, enrichment,
+    temporal facts. ``enrichment`` is a plain string and can be absent.
+    Content and enrichment are shown whole, never trimmed (the unified answer
+    is not compacted anywhere). Content is API data, so it is rendered as
+    plain Text and never parsed as markup."""
     score = _pct(chunk.get("score"))
     score_str = f" • {score}" if score else ""
     context_id = chunk.get("context_id") or ""
@@ -310,11 +307,8 @@ def _unified_chunk_panel(chunk: dict, label: str) -> Panel:
     body: list[Any] = [Text(chunk.get("content") or "")]
     enrichment = chunk.get("enrichment")
     enrichment = enrichment if isinstance(enrichment, str) else ""
-    kind = chunk.get("enrichment_kind")
-    kind = kind if isinstance(kind, str) else ""
-    if enrichment or kind:
-        head = f"enrichment ({kind})" if kind else "enrichment"
-        body.append(Text.assemble((f"{head}: " if enrichment else head, "dim"), enrichment))
+    if enrichment:
+        body.append(Text.assemble(("enrichment: ", "dim"), enrichment))
     for fact in chunk.get("temporal") or []:
         if isinstance(fact, dict):
             span = " to ".join(str(x) for x in (fact.get("start_date"), fact.get("end_date")) if x)
@@ -1035,7 +1029,6 @@ def build_context_item(
     happened_at: str | None = None,
     attributes: dict[str, Any] | None = None,
     custom_attributes: dict[str, Any] | None = None,
-    category: str | None = None,
     forceful_relations: list[str] | None = None,
     acl: list[str] | None = None,
     upsert: bool = True,
@@ -1089,10 +1082,6 @@ def build_context_item(
         item["attributes"] = attributes
     if custom_attributes is not None:
         item["custom_attributes"] = custom_attributes
-    if category:
-        if category not in VALID_CATEGORIES:
-            print_error(f"--category must be one of: {', '.join(sorted(VALID_CATEGORIES))}. Got '{category}'.")
-        item["context_category"] = category
     if forceful_relations:
         ids: list[str] = []
         for value in forceful_relations:
@@ -1144,7 +1133,6 @@ def do_ingest_unified(
     happened_at: str | None = None,
     attributes: str | None = None,
     custom_attributes: str | None = None,
-    category: str | None = None,
     forceful_relations: list[str] | None = None,
     acl: list[str] | None = None,
     upsert: bool = True,
@@ -1168,7 +1156,6 @@ def do_ingest_unified(
         happened_at=happened_at,
         attributes=_parse_json_object(attributes, "--attributes"),
         custom_attributes=_parse_json_object(custom_attributes, "--custom-attributes"),
-        category=category,
         forceful_relations=forceful_relations,
         acl=acl,
         upsert=upsert,
