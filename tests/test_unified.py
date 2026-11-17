@@ -67,7 +67,6 @@ FULL_ITEM = {
     "happened_at": "2026-07-29",
     "attributes": {"team": "support"},
     "custom_attributes": {"source_app": "wiki"},
-    "context_category": "business_knowledge",
     "forceful_relations": {"context_ids": ["chat-w1"]},
     "acl": ["user_email:a@x.com", "domain:acme.com"],
 }
@@ -456,13 +455,13 @@ class TestUnifiedQueryCommand:
         assert result.exit_code == 0, result.output
         out = _plain(result.output)
         assert "Found 2 result(s)" in out
-        # chunks[]: context_id, score, content, enrichment (a string) with
-        # enrichment_kind beside it, temporal facts
+        # chunks[]: context_id, score, content, enrichment (a string),
+        # temporal facts
         assert "refund-policy" in out and "91%" in out
         assert "Refunds are processed within 30 days of purchase by the Finance Department." in out
-        assert "enrichment (business_knowledge): Refund window is 30 days; Finance owns refund processing." in out
+        assert "enrichment: Refund window is 30 days; Finance owns refund processing." in out
         assert "chat-2026-07-29" in out and "84%" in out and "Keep refund answers short please" in out
-        assert "enrichment (user_preference): User prefers short answers about refunds." in out
+        assert "enrichment: User prefers short answers about refunds." in out
         # a temporal fact with only a start date prints only that side
         assert "temporal: Refund policy effective_from June 2026. Start: 2026-06-01 [2026-06-01]" in out
         # graph[]: grouped by origin, path_summary + triplets. A query-path hop
@@ -722,7 +721,7 @@ class TestQueryRenderer:
         # renderer must still read it.
         out = self._render(_impl._format_query_result({**UNIFIED_BODY, "request_id": "req-2"}), width=200)
         assert "Refund Processing -> managed by -> Finance Department" in out
-        assert "enrichment (user_preference)" in out
+        assert "enrichment: User prefers short answers about refunds." in out
         assert "req-2" in out
 
     def test_the_forceful_relations_section_is_hidden_when_empty(self):
@@ -765,32 +764,21 @@ class TestQueryRenderer:
         assert re.search(r"P3\W+Gamma links Delta\.", out) and "Gamma -> links -> Delta [1]" in out
         assert out.index("query path(s)") < out.index("chunk relation path(s)") < out.index("no known origin")
 
-    def test_enrichment_is_a_string_with_its_kind_beside_it(self):
-        chunk = {"context_id": "c1", "score": 0.5, "content": "x"}
-        cases = (
-            # enrichment_kind is present even when there is no enrichment
-            ({"enrichment_kind": "decision_trace"}, "enrichment (decision_trace)", "enrichment (decision_trace):"),
-            ({"enrichment": "Owns refunds."}, "enrichment: Owns refunds.", "enrichment ("),
-            (
-                {"enrichment": "Owns refunds.", "enrichment_kind": "business_knowledge"},
-                "enrichment (business_knowledge): Owns refunds.",
-                None,
-            ),
-        )
-        for fields, present, absent in cases:
-            body = {**EMPTY_BODY, "chunks": [{**chunk, **fields}]}
-            out = self._render(_impl._format_unified_query_result(body))
-            assert present in out, fields
-            if absent:
-                assert absent not in out, fields
+    def test_enrichment_kind_from_an_older_server_is_not_shown(self):
+        chunk = {"context_id": "c1", "score": 0.5, "content": "x", "enrichment_kind": "decision_trace"}
+        out = self._render(_impl._format_unified_query_result({**EMPTY_BODY, "chunks": [chunk]}))
+        assert "enrichment" not in out and "decision_trace" not in out
+        chunk = {**chunk, "enrichment": "Owns refunds."}
+        out = self._render(_impl._format_unified_query_result({**EMPTY_BODY, "chunks": [chunk]}))
+        assert "enrichment: Owns refunds." in out and "decision_trace" not in out
 
-    def test_no_enrichment_line_without_enrichment_or_kind(self):
+    def test_no_enrichment_line_without_enrichment(self):
         body = {**EMPTY_BODY, "chunks": [{"context_id": "c1", "score": 0.5, "content": "x"}]}
         assert "enrichment" not in self._render(_impl._format_unified_query_result(body))
 
     def test_the_old_enrichment_object_is_not_read(self):
-        # `enrichment` was `{text, kind}`; it is a string now, with the kind in
-        # `enrichment_kind`. An object is not rendered, and does not crash.
+        # `enrichment` was `{text, kind}`; it is a string now. An object is not
+        # rendered, and does not crash.
         body = {
             **EMPTY_BODY,
             "chunks": [
@@ -828,8 +816,6 @@ class TestUnifiedIngestCommand:
                     '{"team": "support"}',
                     "--custom-attributes",
                     '{"source_app": "wiki"}',
-                    "--category",
-                    "business_knowledge",
                     "--forceful-relation",
                     "chat-w1",
                     "--acl",
@@ -1043,13 +1029,13 @@ class TestUnifiedIngestCommand:
             assert "JSON object" in result.output
             w.context.ingest_context.assert_not_called()
 
-    def test_a_bad_category_is_refused(self):
+    def test_category_is_not_an_option(self):
         _auth()
         w = _mock("unified")
         with _patch(w):
-            result = runner.invoke(app, ["ingest", "--text", "x", "--category", "wisdom"])
+            result = runner.invoke(app, ["ingest", "--text", "x", "--category", "business_knowledge"])
         assert result.exit_code != 0
-        assert "--category must be one of" in result.output
+        assert "No such option" in _plain(result.output)
         w.context.ingest_context.assert_not_called()
 
     def test_forceful_relation_ids_are_trimmed_and_deduplicated(self):
@@ -1107,7 +1093,6 @@ class TestUnifiedIngestCommand:
             ["--happened-at", "2026-07-29"],
             ["--attributes", "{}"],
             ["--custom-attributes", "{}"],
-            ["--category", "auto"],
             ["--forceful-relation", "x"],
             ["--acl", "a@x.com"],
         ):
