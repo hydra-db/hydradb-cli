@@ -576,6 +576,90 @@ class TestDeleteCollection:
             self._wrapper().databases.delete_collection(collection="support")
         assert exc.value.status_code == 0
 
+    @pytest.mark.parametrize(
+        ("status", "text", "headers"),
+        [
+            (200, "<html>captive portal</html>", {}),
+            (301, "", {"Location": "https://elsewhere"}),
+        ],
+        ids=["non-json-200", "redirect-301"],
+    )
+    def test_a_non_json_or_redirected_response_is_an_error(self, monkeypatch, status, text, headers):
+        # The delete must not report success on a captive-portal page or a
+        # redirect: both used to fall through as an empty "deleted" result.
+        def fake_request(method, url, **kwargs):
+            return httpx.Response(status, text=text, headers=headers, request=httpx.Request(method, url))
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        with pytest.raises(HydraDBClientError) as exc:
+            self._wrapper().databases.delete_collection(collection="support")
+        assert exc.value.status_code == status
+
+    def test_an_empty_body_is_a_successful_delete(self, monkeypatch):
+        def fake_request(method, url, **kwargs):
+            return httpx.Response(204, request=httpx.Request(method, url))
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        assert self._wrapper().databases.delete_collection(collection="support") == {}
+
+
+class TestGraphRawPath:
+    """The BYOG endpoints bypass the SDK, so their response gate is tested here.
+
+    They share :func:`_checked_body` with the other hand-rolled paths: a 3xx or
+    a non-JSON 2xx is an error, never an empty result that reads as success.
+    """
+
+    def _wrapper(self):
+        return HydraDB(token="tok", base_url="http://test.local", database="db_test")
+
+    @staticmethod
+    def _serve(monkeypatch, status, *, text="", json_body=None, headers=None):
+        def fake_request(method, url, **kwargs):
+            if json_body is not None:
+                return httpx.Response(status, json=json_body, headers=headers or {}, request=httpx.Request(method, url))
+            return httpx.Response(status, text=text, headers=headers or {}, request=httpx.Request(method, url))
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+
+    @pytest.mark.parametrize(
+        ("status", "text", "headers"),
+        [
+            (200, "<html>captive portal</html>", {}),
+            (301, "", {"Location": "https://elsewhere"}),
+        ],
+        ids=["non-json-200", "redirect-301"],
+    )
+    def test_a_query_rejects_a_non_json_or_redirected_response(self, monkeypatch, status, text, headers):
+        self._serve(monkeypatch, status, text=text, headers=headers)
+        with pytest.raises(HydraDBClientError) as exc:
+            self._wrapper().graph.query(query="MATCH (n) RETURN n")
+        assert exc.value.status_code == status
+
+    @pytest.mark.parametrize(
+        ("status", "text", "headers"),
+        [
+            (200, "<html>captive portal</html>", {}),
+            (301, "", {"Location": "https://elsewhere"}),
+        ],
+        ids=["non-json-200", "redirect-301"],
+    )
+    def test_a_write_rejects_a_non_json_or_redirected_response(self, monkeypatch, status, text, headers):
+        self._serve(monkeypatch, status, text=text, headers=headers)
+        with pytest.raises(HydraDBClientError) as exc:
+            self._wrapper().graph.drop_collection(collection="c1")
+        assert exc.value.status_code == status
+
+    def test_a_list_payload_is_preserved(self, monkeypatch):
+        # /byog/query answers with a list inside the envelope; an empty list is a
+        # successful write, so the shape must survive unwrapping untouched.
+        self._serve(monkeypatch, 200, json_body={"data": [{"n": 1}], "success": True, "meta": {}})
+        assert self._wrapper().graph.query(query="MATCH (n) RETURN n") == [{"n": 1}]
+
+    def test_an_empty_body_is_a_successful_write(self, monkeypatch):
+        self._serve(monkeypatch, 204)
+        assert self._wrapper().graph.drop_collection(collection="c1") == {}
+
 
 class TestFeedback:
     """``POST /feedback`` — the raw path, and the guards in front of it."""

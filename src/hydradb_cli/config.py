@@ -13,6 +13,7 @@ its canonical replacement. The canonical name wins when both are set.
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Canonical environment variable names (CONTRACT §1).
@@ -79,20 +80,58 @@ def _ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+_warned_bad_config = False
+
+
 def _read_config_file() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            return {}
+    """Read the config file; always returns a dict.
+
+    A missing file is normal. An unreadable/corrupt one (bad JSON, bad encoding,
+    or valid JSON that is not an object) is treated as empty, but warned about
+    once on stderr so it is not mistaken for "never logged in".
+    """
+    global _warned_bad_config
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        reason = "top-level value is not a JSON object"
+    except (ValueError, OSError) as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        reason = str(exc)
+    if not _warned_bad_config:
+        _warned_bad_config = True
+        print(  # noqa: T201 - deliberate one-line stderr notice
+            f"warning: ignoring unreadable config file {CONFIG_FILE} ({reason}); run 'hydradb login' to recreate it.",
+            file=sys.stderr,
+        )
     return {}
 
 
 def _write_config_file(data: dict) -> None:
     _ensure_config_dir()
-    CONFIG_FILE.write_text(json.dumps(data, indent=2) + "\n")
-    # Restrict permissions on config file (contains API key)
-    CONFIG_FILE.chmod(0o600)
+    # ``mkstemp`` gives an unpredictable name, opens with O_EXCL (so a planted
+    # file or symlink at that path can never be written through) and creates it
+    # 0600 from the start — no window where the API key is world-readable. Then
+    # ``os.replace`` swaps it in atomically so an interrupted write can never
+    # leave a truncated config behind.
+    fd, tmp_name = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".config.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1  # fdopen owns the descriptor from here on
+            fh.write(json.dumps(data, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, CONFIG_FILE)
+    except BaseException:
+        # On any failure, close the handle (if fdopen never took it) and remove
+        # the temp file, so a failed save leaves nothing behind.
+        if fd != -1:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def get_api_key() -> str | None:

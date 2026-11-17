@@ -104,6 +104,31 @@ def _request_id_of(obj: Any) -> str | None:
     return rid if isinstance(rid, str) and rid else None
 
 
+def _checked_body(response: httpx.Response) -> Any:
+    """Parse a raw-path response, enforcing the same error contract as the SDK.
+
+    Anything that is not a 2xx carrying JSON (or an empty body) is an error:
+    4xx/5xx as before, plus 3xx (httpx does not follow redirects by default, so a
+    redirect used to be returned as an empty "success") and non-JSON 2xx bodies
+    (captive portals, proxies), which used to surface as empty results.
+    """
+    try:
+        body = response.json() if response.content else None
+    except ValueError:
+        body = response.text or None
+        if response.is_success:
+            raise HydraDBClientError(response.status_code, "The server returned a non-JSON response.") from None
+    if response.is_redirect:
+        target = response.headers.get("location", "another location")
+        raise HydraDBClientError(
+            response.status_code,
+            f"Unexpected redirect to {target}. Check the base URL (it should be https://, with no redirect).",
+        )
+    if not response.is_success:
+        raise HydraDBClientError(response.status_code, _stringify_body(body))
+    return body
+
+
 def _bool_str(value: bool | None) -> str | None:
     """The SDK's multipart ``upsert`` field is a string; map bools to it."""
     if value is None:
@@ -198,15 +223,10 @@ class _Databases(_Resource):
         except httpx.HTTPError as exc:
             raise translate_sdk_error(exc) from exc
 
-        try:
-            body = response.json() if response.content else None
-        except ValueError:
-            body = response.text or None
-
-        if response.is_error:
-            # Same message extraction the SDK and BYOG paths use, so a 404 from
-            # the delete tombstone surfaces the API's own wording.
-            raise HydraDBClientError(response.status_code, _stringify_body(body))
+        # The same response gate the SDK and BYOG paths use: 3xx and non-JSON
+        # 2xx are errors, so a redirect or a captive-portal page can never be
+        # mistaken for a successful deletion. An empty body is still valid.
+        body = _checked_body(response)
 
         return _unwrap_payload(body) or {}
 
@@ -593,18 +613,11 @@ class _Graph(_Resource):
         except httpx.HTTPError as exc:
             raise translate_sdk_error(exc) from exc
 
-        try:
-            body = response.json() if response.content else None
-        except ValueError:
-            body = response.text or None
-
-        if response.is_error:
-            # Route through the same message extraction the SDK path uses, so a
-            # rejected Cypher query surfaces the compiler's own feedback rather
-            # than a bare status code.
-            raise HydraDBClientError(response.status_code, _stringify_body(body))
-
-        return _unwrap_payload(body)
+        # Route through the same response gate the SDK path uses, so a rejected
+        # Cypher query surfaces the compiler's own feedback rather than a bare
+        # status code, and a redirect or non-JSON 2xx is an error rather than an
+        # empty result. ``/byog/query`` returns a list, which passes through.
+        return _unwrap_payload(_checked_body(response))
 
     def query(
         self,
@@ -1010,13 +1023,7 @@ class HydraDB:
         except httpx.HTTPError as exc:
             raise translate_sdk_error(exc) from exc
 
-        try:
-            body = response.json() if response.content else None
-        except ValueError:
-            body = response.text or None
-
-        if response.is_error:
-            raise HydraDBClientError(response.status_code, _stringify_body(body))
+        body = _checked_body(response)
 
         # Unwrap by SHAPE, never by assumption: the connector endpoints mostly
         # return bare objects rather than a HandlerEnvelope.
@@ -1046,13 +1053,7 @@ class HydraDB:
         except httpx.HTTPError as exc:
             raise translate_sdk_error(exc) from exc
 
-        try:
-            body = response.json() if response.content else None
-        except ValueError:
-            body = response.text or None
-
-        if response.is_error:
-            raise HydraDBClientError(response.status_code, _stringify_body(body))
+        body = _checked_body(response)
 
         return _unwrap_payload(body)
 
@@ -1061,7 +1062,7 @@ class HydraDB:
         if not db or not str(db).strip():
             raise HydraDBClientError(
                 0,
-                "No database specified. Use --database or run 'hydradb config set tenant_id <id>'.",
+                "No database specified. Use --database or run 'hydradb config set database <id>'.",
             )
         return db
 

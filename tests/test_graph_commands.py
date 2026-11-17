@@ -10,12 +10,14 @@ import json
 import re
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
 import hydradb_cli.config
 import hydradb_cli.output
 from hydradb_cli.config import save_config
+from hydradb_cli.hydra import HydraDB
 from hydradb_cli.main import app
 
 runner = CliRunner()
@@ -330,6 +332,42 @@ def test_load_chunks_and_merges(tmp_path):
     assert w.graph.query.call_count == 3  # 100 + 100 + 50
     # MERGE on a caller-owned key, so a load that fails part-way is re-runnable.
     assert "MERGE (n:Person {ext_id: row.ext_id})" in w.graph.query.call_args.kwargs["query"]
+
+
+@pytest.mark.parametrize(
+    ("status", "text", "headers"),
+    [
+        (200, "<html>captive portal</html>", {}),
+        (301, "", {"Location": "https://elsewhere"}),
+    ],
+    ids=["non-json-200", "redirect-301"],
+)
+def test_load_does_not_count_a_chunk_the_server_did_not_accept(tmp_path, monkeypatch, status, text, headers):
+    """A 200 HTML page (captive portal) or a redirect is not a successful load.
+
+    ``graph load`` used to count the batch as loaded whenever the request did
+    not raise, so a proxy page after a redirect silently reported every row as
+    ingested. It must now exit non-zero and claim nothing.
+    """
+    _auth()
+    path = tmp_path / "rows.json"
+    path.write_text(json.dumps([{"ext_id": "1"}, {"ext_id": "2"}]))
+
+    w = HydraDB(token="test-key", base_url="http://test.local", database="t1", graph_collection="default")
+
+    def fake_request(method, url, **kwargs):
+        return httpx.Response(status, text=text, headers=headers, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    with patch("hydradb_cli.commands.graph.get_wrapper", return_value=w):
+        result = runner.invoke(
+            app,
+            ["graph", "load", str(path), "--label", "Person", "--key", "ext_id"],
+            env=_WIDE,
+        )
+
+    assert result.exit_code != 0
+    assert "Loaded " not in _text(result)
 
 
 def test_load_rejects_rows_missing_the_merge_key(tmp_path):

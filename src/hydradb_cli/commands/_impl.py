@@ -394,8 +394,10 @@ def do_ingest_knowledge_files(
     try:
         for fp in files:
             p = Path(fp)
-            if not p.exists() or not p.is_file():
+            if not p.exists():
                 print_error(f"File not found: {fp}")
+            if not p.is_file():
+                print_error(f"Not a regular file: {fp}")
             if p.stat().st_size == 0:
                 print_error(f"File is empty: {fp}")
             fh = p.open("rb")

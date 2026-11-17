@@ -27,9 +27,14 @@ def _resolve_text_input(text: str | None) -> str:
     if text == "-":
         if sys.stdin.isatty():
             typer.echo("Reading from stdin (Ctrl+D to finish)...", err=True)
+        # Explicit `-`: the user asked for stdin, so block until EOF rather than
+        # giving up after a short poll (a slow upstream producer would be dropped).
+        # Decoding happens here too, so invalid UTF-8 would otherwise escape as a
+        # traceback instead of the CLI's usual one-line error.
+        try:
             text = sys.stdin.read().strip()
-        else:
-            text = read_stdin_safe()
+        except (OSError, ValueError) as exc:
+            print_error(f"Could not read stdin: {exc}")
         if not text:
             print_error("No input received from stdin.")
     if text is None:
